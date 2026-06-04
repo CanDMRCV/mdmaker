@@ -243,7 +243,9 @@ ALL_TOOLS: dict[str, ToolInfo] = {
                         _detect_calibre, "winget install calibre", required=True),
     "tesseract": ToolInfo("tesseract", "Tesseract OCR", "PDF (scanned)",
                           _detect_tesseract, "winget install tesseract-ocr.tesseract",
-                          "After winget install, RESTART mdmaker — PATH update is needed for new processes.",
+                          "Tesseract is installed but eng.traineddata is missing. "
+                          "Download from: https://github.com/tesseract-ocr/tessdata "
+                          "and place in the tessdata folder next to tesseract.exe.",
                           ),
     "7zip": ToolInfo("7zip", "7-Zip", "CHM",
                      _detect_7zip, "winget install 7zip.7zip"),
