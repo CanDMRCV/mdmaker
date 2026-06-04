@@ -5,8 +5,9 @@ parallel execution (ADR-006: ThreadPoolExecutor for I/O-bound work).
 """
 
 import time
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
@@ -107,6 +108,8 @@ def convert_batch(
     paths: list[Path], output_dir: Path, *,
     force: bool = False, dry_run: bool = False,
     recursive: bool = False, jobs: int = 1,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict:
     """Convert a batch of files with progress bar and optional parallelism.
 
@@ -148,10 +151,17 @@ def convert_batch(
                 except Exception:
                     failed += 1
                 pbar.update(1)
+                if progress_callback:
+                    progress_callback(ok + failed, len(files), path.name)
+                if cancel_event and cancel_event.is_set():
+                    break
             pbar.close()
     else:
         pbar = tqdm(files, unit="file", desc="Converting")
         for path in pbar:
+            if cancel_event and cancel_event.is_set():
+                tqdm.write("[!] Canceled by user.")
+                break
             pbar.set_postfix_str(path.name[:40])
             md_path = output_dir / (path.stem + ".md")
             existed = md_path.exists() and md_path.stat().st_size > 100
@@ -165,6 +175,9 @@ def convert_batch(
                     ok += 1
             else:
                 failed += 1
+
+            if progress_callback:
+                progress_callback(ok + failed + skipped, len(files), path.name)
 
     elapsed = time.perf_counter() - start
     return {"total": len(files), "ok": ok, "skipped": skipped, "failed": failed, "elapsed_s": elapsed}
