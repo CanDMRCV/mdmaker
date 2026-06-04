@@ -79,10 +79,14 @@ class _PdfOcrConverter:
         from PIL import Image
         import io
 
-        # Robust resolution: find tesseract before use (Rücklauf 5)
+        # Robust resolution: find tesseract + tessdata before use (Rücklauf 5)
         tesseract_exe = _resolve_tesseract()
         if tesseract_exe:
             pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+            # Set TESSDATA_PREFIX to the tessdata directory next to the binary
+            tessdata_dir = Path(tesseract_exe).parent / "tessdata"
+            if tessdata_dir.exists():
+                os.environ["TESSDATA_PREFIX"] = str(Path(tesseract_exe).parent)
 
         doc = fitz.open(str(path))
         parts = []
