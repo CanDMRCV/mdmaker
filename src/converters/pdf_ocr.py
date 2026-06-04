@@ -83,13 +83,14 @@ class _PdfOcrConverter:
         tesseract_exe = _resolve_tesseract()
         if tesseract_exe:
             pytesseract.pytesseract.tesseract_cmd = tesseract_exe
-            # Find tessdata: check install dir, then LOCALAPPDATA (user-writable)
-            for prefix in [
-                Path(tesseract_exe).parent,  # C:\Program Files\Tesseract-OCR
-                Path(os.environ.get("LOCALAPPDATA", "")),  # user-writable
+            # Find tessdata: TESSDATA_PREFIX must point to the folder
+            # that DIRECTLY contains eng.traineddata (no "tessdata" subfolder in Tesseract 5.x)
+            for candidate in [
+                Path(tesseract_exe).parent / "tessdata",       # C:\...\Tesseract-OCR\tessdata
+                Path(os.environ.get("LOCALAPPDATA", "")) / "tessdata",  # %LOCALAPPDATA%\tessdata
             ]:
-                if (prefix / "tessdata" / "eng.traineddata").exists():
-                    os.environ["TESSDATA_PREFIX"] = str(prefix)
+                if (candidate / "eng.traineddata").exists():
+                    os.environ["TESSDATA_PREFIX"] = str(candidate)
                     break
 
         doc = fitz.open(str(path))
