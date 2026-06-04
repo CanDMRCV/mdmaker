@@ -1,0 +1,31 @@
+# Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OCR temp files
+*_ocr_temp/
+*tesseract_temp/
+
+# Project-specific
+/briefing/*.local
+.DS_Store
+Thumbs.db

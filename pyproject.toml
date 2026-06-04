@@ -1,0 +1,41 @@
+[project]
+name = "mdmaker"
+version = "0.1.0"
+description = "Multi-format e-book to Markdown converter — pandoc for e-books"
+readme = "docs/README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "Eisenagel-Studio"}]
+keywords = ["markdown", "ebook", "converter", "pdf", "epub", "ocr"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Markup",
+]
+
+dependencies = [
+    "pdfplumber>=0.7",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+ocr = ["PyMuPDF>=1.20", "pytesseract>=0.3", "Pillow>=9.0"]
+docx = ["python-docx>=0.8"]
+security = ["defusedxml>=0.7"]
+all = ["mdmaker[ocr,docx,security]"]
+
+[project.scripts]
+mdmaker = "src.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
