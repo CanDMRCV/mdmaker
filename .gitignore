@@ -82,3 +82,6 @@ RETROSPEKTIVE_*.md
 # ── OCR temp ──
 *_ocr_temp/
 *tesseract_temp/
+
+.claude/
+briefing/
