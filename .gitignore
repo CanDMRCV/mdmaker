@@ -1,7 +1,4 @@
-# Python
-venv/
-.venv/
-env/
+# ── Python ──
 __pycache__/
 *.pyc
 *.pyo
@@ -9,23 +6,79 @@ __pycache__/
 dist/
 build/
 *.egg
+venv/
+.venv/
+env/
 
-# Testing
+# ── Testing ──
 .pytest_cache/
 .coverage
 htmlcov/
+tests/fixtures/*.pdf
+tests/fixtures/*.epub
+tests/fixtures/*.mobi
 
-# IDE
+# ── IDE / OS ──
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OCR temp files
-*_ocr_temp/
-*tesseract_temp/
-
-# Project-specific
-/briefing/*.local
 .DS_Store
 Thumbs.db
+
+# ── Logs & CSV (keine Pfad/Dateinamen-Daten) ──
+*.log
+rename-*.csv
+*-log*.txt
+recover-log.csv
+karten-audit.csv
+move-plan.csv
+
+# ── Eingaben/Ausgaben & private Daten — NIE committen ──
+*.pdf
+*.epub
+*.mobi
+*.azw
+*.azw3
+*.prc
+*.djvu
+*.chm
+*.doc
+*.docx
+*.fb2
+*.cbz
+*.cbr
+*.xz
+*.zip
+
+# ── Ausgabe-Ordner (Konvertate) ──
+_md_output/
+_md_output_test/
+_md_output_test2/
+_md_output_batch2/
+_test_output/
+_test_out/
+markdown/
+out/
+output/
+*_md/
+*_output/
+
+# ── Secrets ──
+.env
+*.key
+*secret*
+*token*
+settings.local.json
+
+# ── Build ──
+mdmaker.egg-info/
+src/__pycache__/
+
+# ── Projekt-intern (nicht öffentlich) ──
+/briefing/*.local
+RETROSPEKTIVE_*.md
+
+# ── OCR temp ──
+*_ocr_temp/
+*tesseract_temp/
