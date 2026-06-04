@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStatusBar,
     QPushButton, QLabel, QProgressBar, QTextBrowser,
     QFileDialog, QGroupBox, QCheckBox, QSpinBox, QLineEdit,
-    QMessageBox, QApplication, QFrame,
+    QMessageBox, QApplication,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QSettings
 from PySide6.QtGui import QFont, QColor
@@ -21,11 +21,8 @@ from ..pipeline import collect_files, convert_batch, FileResult
 from ..detector import classify_pdf
 from .setup_dialog import SetupDialog, PreRunCheckDialog
 from .tool_detection import (
-    ALL_TOOLS, ToolInfo, missing_tools, tools_needed_for_files,
-    tr as _tr,
+    ALL_TOOLS, ToolInfo, missing_tools, tools_needed_for_files, tr,
 )
-
-tr = _tr
 
 
 def _ocr_needed(path: Path) -> bool:
@@ -104,16 +101,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setSpacing(6)
 
-        # ── Tool status (B4/B5: clean, one line per tool, copyable) ──
-        self._tool_frame = QFrame()
-        self._tool_frame.setFrameStyle(QFrame.StyledPanel)
-        self._tool_frame.setStyleSheet(
-            "QFrame { background: #f8f9fa; border-radius: 4px; padding: 4px; }")
-        self._tool_layout = QVBoxLayout(self._tool_frame)
-        self._tool_layout.setSpacing(1)
-        self._tool_status_label = QLabel(tr("Checking tools…"))
-        self._tool_layout.addWidget(self._tool_status_label)
-        layout.addWidget(self._tool_frame)
+        # ── Tool status: subtle footer, not aggressive banner (B5) ──
+        self._tool_status_label = QLabel("")
+        self._tool_status_label.setStyleSheet("color: #6c757d; font-size: 9pt; padding: 2px;")
+        self._tool_status_label.setWordWrap(True)
+        layout.addWidget(self._tool_status_label)
 
         # ── I/O ──
         io = QGroupBox(tr("Input / Output"))
@@ -207,54 +199,25 @@ class MainWindow(QMainWindow):
     # ── B4/B5: Clean tool status — one line per missing tool, copyable command ──
 
     def _refresh_tools(self):
-        # Clear old rows
-        while self._tool_layout.count() > 1:
-            w = self._tool_layout.takeAt(1)
-            if w.widget(): w.widget().deleteLater()
-            elif w.layout():
-                while w.layout().count():
-                    cw = w.layout().takeAt(0).widget()
-                    if cw: cw.deleteLater()
-
+        """B5: Subtle one-line status, not aggressive banner."""
         missing = [t for t in ALL_TOOLS.values() if not t.is_installed()]
+        missing_required = [t for t in missing if t.required]
+        missing_optional = [t for t in missing if not t.required]
 
         if not missing:
             self._tool_status_label.setText("✅ " + tr("All tools ready."))
-            self._tool_status_label.setStyleSheet("color: #198754; padding: 2px;")
+            self._tool_status_label.setStyleSheet("color: #198754; font-size: 9pt; padding: 2px;")
         else:
-            self._tool_status_label.setText("⚠ " + tr("Missing tools:"))
-            self._tool_status_label.setStyleSheet("color: #dc3545; padding: 2px; font-weight: bold;")
-
-            for t in missing:
-                row = QHBoxLayout()
-                row.setSpacing(4)
-
-                # Tool name + what it's for
-                label = QLabel(f"  ❌ {t.name} — {tr('needed for:')} {t.formats}")
-                label.setStyleSheet("color: #dc3545; font-size: 9pt;")
-                row.addWidget(label, 1)
-
-                # Install command (copyable!) or install note
-                cmd = t.install_cmd
-                if cmd:
-                    copy_btn = QPushButton(tr("📋 Copy"))
-                    copy_btn.setToolTip(cmd)
-                    copy_btn.setStyleSheet(
-                        "QPushButton { font-size: 8pt; padding: 2px 6px; }"
-                        "QPushButton:hover { background: #e2e6ea; }")
-                    copy_btn.clicked.connect(lambda checked, c=cmd: self._copy_to_clipboard(c))
-                    row.addWidget(copy_btn)
-
-                    if hasattr(self, '_tool_frame'):
-                        install_cmd_text = cmd
-                else:
-                    # No winget command (Word) — show install note
-                    note_label = QLabel(t.install_note[:80] if t.install_note else "")
-                    note_label.setStyleSheet("color: #6c757d; font-size: 8pt;")
-                    note_label.setWordWrap(True)
-                    row.addWidget(note_label, 2)
-
-                self._tool_layout.addLayout(row)
+            req_names = ", ".join(t.name for t in missing_required)
+            opt_names = ", ".join(t.name for t in missing_optional)
+            parts = []
+            if req_names:
+                parts.append(tr(f"Required missing: {req_names}"))
+            if opt_names:
+                parts.append(tr(f"Optional missing: {opt_names}"))
+            text = "⚠ " + " · ".join(parts) + tr(" — open Setup (⚙) for install commands")
+            self._tool_status_label.setText(text)
+            self._tool_status_label.setStyleSheet("color: #6c757d; font-size: 9pt; padding: 2px;")
 
     def _copy_to_clipboard(self, text: str):
         QApplication.clipboard().setText(text)
