@@ -32,7 +32,15 @@ class _PdfOcrConverter:
             import pytesseract  # noqa: F401
         except ImportError:
             missing.append("pytesseract not installed.\n  Fix: pip install pytesseract")
-        if shutil.which("tesseract") is None:
+        tesseract_found = shutil.which("tesseract") is not None
+        if not tesseract_found:
+            # Check common install paths
+            for p in [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                      r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]:
+                if Path(p).exists():
+                    tesseract_found = True
+                    break
+        if not tesseract_found:
             missing.append(
                 "Tesseract OCR not found.\n"
                 "  Install: winget install tesseract-ocr.tesseract\n"
