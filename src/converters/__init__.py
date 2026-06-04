@@ -56,3 +56,7 @@ from . import pdf_text   # noqa: E402, F401
 from . import pdf_ocr    # noqa: E402, F401
 from . import zip_archive  # noqa: E402, F401
 from . import xz_archive  # noqa: E402, F401
+from . import docx      # noqa: E402, F401
+from . import doc        # noqa: E402, F401
+from . import djvu       # noqa: E402, F401
+from . import chm        # noqa: E402, F401
