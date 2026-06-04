@@ -102,7 +102,9 @@ class _PdfOcrConverter:
             page = doc[i]
             pix = page.get_pixmap(dpi=200)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
-            text = pytesseract.image_to_string(img, lang="eng")
+            # Detect available languages: prefer deu+eng for German books
+            lang = "deu+eng" if (Path(os.environ.get("TESSDATA_PREFIX", "")) / "deu.traineddata").exists() else "eng"
+            text = pytesseract.image_to_string(img, lang=lang)
             if text.strip():
                 parts.append(f"\n## Page {i + 1}\n\n{text}\n")
                 total_chars += len(text)
