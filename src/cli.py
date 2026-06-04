@@ -73,17 +73,29 @@ Examples:
         recursive=args.recursive, jobs=args.jobs,
     )
 
-    # Summary
+    # Summary (BatchSummary is a dataclass now)
     if args.dry_run:
-        print(f"\n[*] Dry run: {summary['total']} file(s) would be processed.")
+        print(f"\n[*] Dry run: {summary.total} file(s) would be processed.")
     else:
         print(
             f"\n{'='*50}\n"
-            f"  [OK] {summary['ok']}  [SKIP] {summary['skipped']}  "
-            f"[FAIL] {summary['failed']}  —  {summary['elapsed_s']:.1f}s\n"
+            f"  [OK] {summary.ok}  [SKIP] {summary.skipped}  "
+            f"[FAIL] {summary.failed}  —  {summary.elapsed_s:.1f}s\n"
             f"{'='*50}"
         )
-        if summary["failed"]:
+        # A1: Show failed files with reason
+        if summary.failed:
+            print("\nFailed files:")
+            for fr in summary.results:
+                if fr.status == "failed":
+                    print(f"  {fr.path.name}  [{fr.converter}]  —  {fr.error}")
+        # B6: Show time breakdown
+        if summary.converter_times:
+            print("\nTime by converter:")
+            for label, secs in sorted(summary.converter_times.items(),
+                                       key=lambda x: -x[1]):
+                print(f"  {label}: {secs:.1f}s")
+        if summary.failed:
             return 1
 
     return 0
