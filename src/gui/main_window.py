@@ -1,8 +1,9 @@
-"""Main window — v0.3.0 (Rücklauf 3: perf, scan-in-worker, actionable setup).
+"""Main window — v0.3.1 (Rücklauf 3 final: First-Run-Setup + Pre-Run-Check).
 
 Studio-Regeln (design v1.2.0):
-  - "Offer solution, not just problem": actionable fix buttons
   - Copy-affordanz: all text selectable
+  - "Offer solution, not just problem": actionable fix buttons
+  - First-Run-Setup: consent-gated install, never silent
 """
 
 import threading
@@ -12,14 +13,14 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStatusBar,
     QPushButton, QLabel, QProgressBar, QTextBrowser,
     QFileDialog, QGroupBox, QCheckBox, QSpinBox, QLineEdit,
-    QMessageBox, QDialog, QDialogButtonBox, QApplication,
-    QFrame,
+    QMessageBox, QApplication, QFrame,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QSettings
 from PySide6.QtGui import QFont, QColor
 
 from ..pipeline import collect_files, convert_batch, check_all_dependencies, FileResult
 from ..detector import classify_pdf
+from .setup_dialog import SetupDialog, PreRunCheckDialog, missing_tools
 
 
 def tr(s: str) -> str:
@@ -34,8 +35,6 @@ def _ocr_needed(path: Path) -> bool:
     except Exception:
         return False
 
-
-# ── Tool info (B3: which formats blocked + winget commands) ──
 
 TOOL_INFO = {
     "Tesseract OCR": {
@@ -74,16 +73,13 @@ class _WorkerSignals(QObject):
     progress = Signal(int, int, str, str)
     file_done = Signal(object)
     finished = Signal(object)
-    scan_done = Signal(list, int)  # files list, ocr_count
+    scan_done = Signal(list, int)
 
 
 class _ScanWorker(QThread):
-    """A2: Scan input folder in background — UI never freezes."""
-
     def __init__(self, directory: Path, recursive: bool):
         super().__init__()
-        self.directory = directory
-        self.recursive = recursive
+        self.directory = directory; self.recursive = recursive
         self.signals = _WorkerSignals()
 
     def run(self):
@@ -104,8 +100,8 @@ class ConvertWorker(QThread):
         self._cancel.set()
 
     def run(self):
-        def cb(current, total, filename, phase):
-            self.signals.progress.emit(current, total, filename, phase)
+        def cb(c, t, f, p):
+            self.signals.progress.emit(c, t, f, p)
         summary = convert_batch(
             self.paths, self.output_dir,
             recursive=self.recursive, jobs=self.jobs, force=self.force,
@@ -124,8 +120,11 @@ class MainWindow(QMainWindow):
         self._worker: ConvertWorker | None = None
         self._scan_worker: _ScanWorker | None = None
         self._result_text = ""
+        self._scanned_files: list[Path] = []
         self._build_ui()
         self._refresh_deps()
+        # A1: First-run setup check after window paints
+        QTimer.singleShot(300, self._check_first_run)
 
     # ── UI ──
 
@@ -135,10 +134,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setSpacing(6)
 
-        # ── Tool status bar (B3 + A3: actionable) ──
         self._tool_frame = QFrame()
         self._tool_frame.setFrameStyle(QFrame.StyledPanel)
-        self._tool_frame.setStyleSheet("QFrame { background: #f8f9fa; border-radius: 4px; padding: 4px; }")
+        self._tool_frame.setStyleSheet(
+            "QFrame { background: #f8f9fa; border-radius: 4px; padding: 4px; }")
         tool_layout = QVBoxLayout(self._tool_frame)
         tool_layout.setSpacing(2)
         self._tool_status_label = QLabel(tr("Checking tools…"))
@@ -147,17 +146,16 @@ class MainWindow(QMainWindow):
         tool_layout.addLayout(self._tool_buttons_layout)
         layout.addWidget(self._tool_frame)
 
-        # ── Input / Output ──
         io = QGroupBox(tr("Input / Output"))
         iol = QVBoxLayout(io)
-        for lbl, attr, placeholder in [
+        for lbl, attr, ph in [
             ("Source:", "_input_edit", "Select folder with e-books…"),
             ("Output:", "_output_edit", "_md_output"),
         ]:
             row = QHBoxLayout()
             row.addWidget(QLabel(tr(lbl)))
             edit = QLineEdit()
-            edit.setPlaceholderText(tr(placeholder))
+            edit.setPlaceholderText(tr(ph))
             row.addWidget(edit)
             btn = QPushButton(tr("Browse…"))
             btn.clicked.connect(self._pick_input if "Source" in lbl else self._pick_output)
@@ -176,30 +174,25 @@ class MainWindow(QMainWindow):
         iol.addLayout(opt_row)
         layout.addWidget(io)
 
-        # ── Pre-scan warning ──
         self._pre_scan_warning = QLabel("")
         self._pre_scan_warning.setWordWrap(True)
         self._pre_scan_warning.setStyleSheet(
             "background-color: #fff3cd; color: #664d03; padding: 4px; "
-            "border: 1px solid #ffc107; border-radius: 3px; font-size: 10pt;"
-        )
+            "border: 1px solid #ffc107; border-radius: 3px; font-size: 10pt;")
         self._pre_scan_warning.hide()
         layout.addWidget(self._pre_scan_warning)
 
-        # ── Progress ──
         self._progress_bar = QProgressBar()
         layout.addWidget(self._progress_bar)
         self._progress_detail = QLabel(tr("Ready."))
         layout.addWidget(self._progress_detail)
 
-        # ── Results ──
         self._results_view = QTextBrowser()
         self._results_view.setFont(QFont("Consolas", 9))
         self._results_view.setReadOnly(True)
         self._results_view.setOpenExternalLinks(False)
         layout.addWidget(self._results_view, 1)
 
-        # ── Buttons ──
         btn_row = QHBoxLayout()
         style = ("QPushButton { background-color: #198754; color: white; padding: 8px 24px; "
                  "font-size: 13pt; font-weight: bold; border-radius: 4px; }"
@@ -216,26 +209,42 @@ class MainWindow(QMainWindow):
         self._copy_btn = QPushButton(tr("📋 Copy All"))
         self._copy_btn.clicked.connect(self._copy_results)
         btn_row.addWidget(self._copy_btn)
+        self._setup_btn = QPushButton(tr("⚙ Setup"))
+        self._setup_btn.clicked.connect(self._show_setup)
+        btn_row.addWidget(self._setup_btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        # ── DRM Footer ──
         self._status_bar = QStatusBar()
         self._status_bar.showMessage(
             tr("Processes only files you legally own. No DRM removal. All processing local."))
         self.setStatusBar(self._status_bar)
 
-    # ── Tool status + Actionable setup ──
+    # ── A1: First-Run Setup ──
+
+    def _check_first_run(self):
+        """Show setup dialog on first launch (tracked via QSettings)."""
+        settings = QSettings("Eisenagel", "mdmaker")
+        if not settings.value("setup/completed", False, type=bool):
+            dlg = SetupDialog(self)
+            dlg.exec()
+            settings.setValue("setup/completed", True)
+            self._refresh_deps()
+
+    def _show_setup(self):
+        """Re-open setup dialog on demand."""
+        dlg = SetupDialog(self)
+        dlg.exec()
+        self._refresh_deps()
+
+    # ── Tool status ──
 
     def _refresh_deps(self):
-        """A3: Show missing tools with clickable Install buttons."""
-        lines = []; buttons_exist = False
-        # Clear old buttons
         while self._tool_buttons_layout.count():
             w = self._tool_buttons_layout.takeAt(0).widget()
             if w: w.deleteLater()
 
-        all_ok = True
+        all_ok = True; lines = []
         for name, info in TOOL_INFO.items():
             if info["check"]():
                 all_ok = False
@@ -246,7 +255,6 @@ class MainWindow(QMainWindow):
                 btn.setStyleSheet("QPushButton { color: #dc3545; font-size: 9pt; }")
                 btn.clicked.connect(lambda checked, c=cmd: self._copy_command(c))
                 self._tool_buttons_layout.addWidget(btn)
-                buttons_exist = True
 
         if all_ok:
             self._tool_status_label.setText("✅ " + tr("All external tools available."))
@@ -256,10 +264,7 @@ class MainWindow(QMainWindow):
                 "⚠ " + tr("Missing tools — click to copy install command:\n") + "\n".join(lines))
             self._tool_status_label.setStyleSheet("color: #dc3545; font-size: 9pt;")
 
-        if not buttons_exist:
-            self._tool_frame.hide()
-        else:
-            self._tool_frame.show()
+        self._tool_frame.setVisible(not all_ok)
 
     def _copy_command(self, cmd: str):
         QApplication.clipboard().setText(cmd)
@@ -279,7 +284,6 @@ class MainWindow(QMainWindow):
             self._output_edit.setText(d)
 
     def _start_scan(self, directory: Path):
-        """A2: Scan in worker thread — UI stays responsive."""
         self._progress_detail.setText(tr("Scanning folder…"))
         self._pre_scan_warning.hide()
         self._scan_worker = _ScanWorker(directory, self._recursive_cb.isChecked())
@@ -287,21 +291,19 @@ class MainWindow(QMainWindow):
         self._scan_worker.start()
 
     def _on_scan_done(self, files: list, ocr_count: int):
-        """Handle scan results + show OCR warning if needed."""
+        self._scanned_files = files
         self._progress_detail.setText(
             tr(f"{len(files)} supported files found, {ocr_count} need OCR."))
-
         if ocr_count > 0:
-            tesseract_ok = not TOOL_INFO["Tesseract OCR"]["check"]()
-            if not tesseract_ok:
+            t_ok = not TOOL_INFO["Tesseract OCR"]["check"]()
+            if not t_ok:
                 self._pre_scan_warning.setText(
                     tr(f"⚠ {ocr_count} file(s) need OCR but Tesseract is missing. "
-                       f"They will FAIL. Click 'Install Tesseract OCR' above to fix."))
-                self._pre_scan_warning.show()
+                       f"They will FAIL. Click 'Install' above or open Setup (⚙)."))
             else:
                 self._pre_scan_warning.setText(
                     tr(f"ℹ {ocr_count} file(s) will use OCR (may be slower)."))
-                self._pre_scan_warning.show()
+            self._pre_scan_warning.show()
         else:
             self._pre_scan_warning.hide()
 
@@ -313,6 +315,13 @@ class MainWindow(QMainWindow):
         if not inp:
             QMessageBox.warning(self, tr("Error"), tr("Please select a source folder."))
             return
+
+        # A2: Pre-Run Check — warn before starting if tools missing
+        files = self._scanned_files if self._scanned_files else collect_files(
+            [Path(inp)], recursive=self._recursive_cb.isChecked())
+        dlg = PreRunCheckDialog(files, self)
+        if dlg.exec() == QMessageBox.Rejected:
+            return  # User cancelled
 
         self._worker = ConvertWorker(
             [Path(inp)], Path(outp),
@@ -353,10 +362,9 @@ class MainWindow(QMainWindow):
             color, line = "#6c757d", f"SKIP  {fr.path.name}"
         else:
             color = "#dc3545"
-            remedy = TOOL_INFO.get(
-                {"pdf_scan": "Tesseract OCR", "epub": "Calibre", "mobi": "Calibre",
-                 "djvu": "DjVuLibre", "chm": "7-Zip"}.get(fr.format_detected, ""), {}
-            ).get("install", "")
+            fmts = {"pdf_scan": "Tesseract OCR", "epub": "Calibre", "mobi": "Calibre",
+                    "djvu": "DjVuLibre", "chm": "7-Zip"}
+            remedy = TOOL_INFO.get(fmts.get(fr.format_detected, ""), {}).get("install", "")
             hint = f"\n      Fix: {remedy}" if remedy else ""
             line = (f"FAIL  {fr.path.name}\n"
                     f"      Converter: {fr.converter}\n"
@@ -372,20 +380,17 @@ class MainWindow(QMainWindow):
     def _on_finished(self, summary):
         self._progress_bar.setValue(100)
         self._start_btn.setEnabled(True); self._cancel_btn.setEnabled(False)
-        self._worker = None
-        s = summary
+        self._worker = None; s = summary
 
-        summary_text = (
-            f"\n{'='*50}\n"
-            f"SUMMARY: {s.ok} OK, {s.skipped} skipped, {s.failed} failed — {s.elapsed_s:.1f}s\n"
-            f"Parallel workers: {self._jobs_spin.value()}\n"
-        )
+        st = (f"\n{'='*50}\n"
+              f"SUMMARY: {s.ok} OK, {s.skipped} skipped, {s.failed} failed — {s.elapsed_s:.1f}s\n"
+              f"Parallel workers: {self._jobs_spin.value()}\n")
         if s.converter_times:
-            summary_text += "Time by converter:\n"
+            st += "Time by converter:\n"
             for label, secs in sorted(s.converter_times.items(), key=lambda x: -x[1]):
-                summary_text += f"  {label}: {secs:.1f}s\n"
+                st += f"  {label}: {secs:.1f}s\n"
 
-        self._result_text += summary_text
+        self._result_text += st
         self._results_view.setHtml(
             f"<pre style='font-family:Consolas; font-size:9pt; white-space:pre-wrap;'>"
             f"{self._result_text}</pre>")
