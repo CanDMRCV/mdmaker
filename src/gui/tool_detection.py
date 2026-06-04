@@ -272,7 +272,7 @@ def tools_needed_for_files(files: list[Path]) -> list[ToolInfo]:
         if ext in (".epub", ".mobi", ".prc", ".azw", ".azw3"):
             needed.add("calibre")
         elif ext == ".pdf":
-            from ...detector import classify_pdf
+            from ..detector import classify_pdf
             try:
                 if classify_pdf(f) == "pdf_scan":
                     needed.add("tesseract")
