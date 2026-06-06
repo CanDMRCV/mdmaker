@@ -1,4 +1,4 @@
-"""Tool detection v2 (Rücklauf 5: PATH-Vererbung behoben).
+r"""Tool detection v2 (Rücklauf 5: PATH-Vererbung behoben).
 
 Beleg-Block (Rücklauf 5):
   - Anderson R2: "what you measure ≠ what you get" wenn PATH-Erbe ignoriert
