@@ -47,8 +47,9 @@ class _PdfTextConverter:
         doc = fitz.open(str(path))
         parts = []
         total_chars = 0
+        total_pages = len(doc)
 
-        for i in range(len(doc)):
+        for i in range(total_pages):
             page = doc[i]
             text = page.get_text()
             if text and text.strip():
@@ -61,7 +62,7 @@ class _PdfTextConverter:
         title = path.stem
         header = (
             f"# {title}\n\n"
-            f"> {len(doc) if hasattr(doc, '__len__') else '?'} pages · "
+            f"> {total_pages} pages · "
             f"{total_chars:,} chars · Converted via PyMuPDF (fitz)\n\n"
         )
         md_path.write_text(header + "\n".join(parts), encoding="utf-8")
@@ -74,6 +75,7 @@ class _PdfTextConverter:
 
         with pdfplumber.open(str(path)) as pdf:
             pages = pdf.pages
+            total_pages = len(pages)
             parts = []
             total_chars = 0
 
@@ -87,7 +89,7 @@ class _PdfTextConverter:
         title = path.stem
         header = (
             f"# {title}\n\n"
-            f"> {len(pages)} pages · {total_chars:,} chars · "
+            f"> {total_pages} pages · {total_chars:,} chars · "
             f"Converted via pdfplumber\n\n"
         )
         md_path.write_text(header + "\n".join(parts), encoding="utf-8")

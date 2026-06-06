@@ -1,6 +1,6 @@
 [project]
 name = "mdmaker"
-version = "0.1.0"
+version = "0.3.4"
 description = "Multi-format e-book to Markdown converter — pandoc for e-books"
 readme = "docs/README.md"
 license = {text = "Apache-2.0"}

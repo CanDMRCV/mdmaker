@@ -5,12 +5,20 @@ parallel execution (ADR-006: ThreadPoolExecutor for I/O-bound work).
 v0.2.1: per-file results, timing, phase-aware progress for GUI.
 """
 
+import sys
 import time
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Issue #3: Force UTF-8 stdout so tqdm bars render cleanly on Windows
+# (cp1252/cp850 terminals show � artifacts for Unicode chars like ✓/─).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from tqdm import tqdm
 
