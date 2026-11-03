@@ -7,6 +7,8 @@ v0.5.1: CREATE_NO_WINDOW on all subprocess calls, per-file progress notification
 
 import sys
 import os
+import shutil
+import tempfile
 import time
 import threading
 from dataclasses import dataclass, field
@@ -33,7 +35,7 @@ except Exception:
 from tqdm import tqdm
 
 from .detector import detect_format, classify_pdf, detect_by_magic
-from .converters import find_converter, check_all_deps as _check_all_converter_deps
+from .converters import find_converter, sanitize_filename, check_all_deps as _check_all_converter_deps
 
 
 @dataclass
@@ -96,6 +98,14 @@ def convert_file(path: Path, output_dir: Path,
                  force: bool = False, dry_run: bool = False) -> FileResult:
     """Convert one file. Returns structured FileResult."""
     t0 = time.perf_counter()
+    md_path = output_dir / (sanitize_filename(path.stem) + ".md")
+
+    # Skip BEFORE detection/classification — reruns over big folders stay instant.
+    if md_path.exists() and not force:
+        return FileResult(path=path, status="skipped", converter="—",
+                          format_detected="—", error="",
+                          elapsed_s=time.perf_counter() - t0, output_md=md_path)
+
     fmt = detect_format(path)
     conv_label = "unknown"
     error = ""
@@ -127,12 +137,6 @@ def convert_file(path: Path, output_dir: Path,
                           elapsed_s=time.perf_counter() - t0)
 
     conv_label = converter.label
-    md_path = output_dir / (path.stem + ".md")
-
-    if md_path.exists() and not force:
-        return FileResult(path=path, status="skipped", converter=conv_label,
-                          format_detected=fmt, error="",
-                          elapsed_s=time.perf_counter() - t0, output_md=md_path)
 
     if dry_run:
         tqdm.write(f"   [*] Would convert [{conv_label}]: {path.name}")
@@ -140,19 +144,30 @@ def convert_file(path: Path, output_dir: Path,
                           format_detected=fmt, error="",
                           elapsed_s=time.perf_counter() - t0, output_md=md_path)
 
+    # Convert into a private temp dir, then os.replace() into place: a crash,
+    # Ctrl+C or cancel never leaves a half-written .md that the next run would
+    # "skip" as done. Also keeps converter scratch files (.txt) out of output_dir.
+    # ponytail: a hard kill can leave an empty .mdmaker_* dir behind — harmless.
+    tmp_dir = Path(tempfile.mkdtemp(prefix=".mdmaker_", dir=output_dir))
     try:
-        result = converter.convert(path, output_dir)
+        result = converter.convert(path, tmp_dir)
         ok = result is not None and result.exists() and result.stat().st_size > 100
+        final = None
+        if ok:
+            final = output_dir / result.name
+            os.replace(result, final)
         return FileResult(path=path,
                           status="ok" if ok else "failed",
                           converter=conv_label, format_detected=fmt,
                           error="" if ok else "Output too small or missing",
                           elapsed_s=time.perf_counter() - t0,
-                          output_md=result if ok else None)
+                          output_md=final)
     except Exception as e:
         return FileResult(path=path, status="failed", converter=conv_label,
-                          format_detected=fmt, error=str(e),
+                          format_detected=fmt, error=f"{type(e).__name__}: {e}",
                           elapsed_s=time.perf_counter() - t0)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def convert_batch(
@@ -202,9 +217,25 @@ def convert_batch(
 
     if jobs > 1:
         tqdm.write(f"Using {jobs} parallel workers.\n")
-        with ThreadPoolExecutor(max_workers=jobs) as executor:
-            futures = {}
-            submitted = 0
+        executor = ThreadPoolExecutor(max_workers=jobs)
+        futures = {}
+
+        def _finished():
+            """Futures in completion order; on cancel: drop the queue, then
+            yield only the files already running (they finish atomically).
+            NB: executor.shutdown(cancel_futures=True) deadlocks as_completed —
+            futures cancelled that way never wake its waiter."""
+            pending = set(futures)
+            for f in as_completed(futures):
+                pending.discard(f)
+                yield f
+                if cancel_event and cancel_event.is_set():
+                    break
+            for f in pending:
+                f.cancel()  # only succeeds for queued, not running, futures
+            yield from (f for f in pending if not f.cancelled())
+
+        try:
             for path in files:
                 if cancel_event and cancel_event.is_set():
                     break
@@ -217,9 +248,7 @@ def convert_batch(
             _notify(0, f"{total_files} files queued", "converting")
 
             completed = 0
-            for future in as_completed(futures):
-                if cancel_event and cancel_event.is_set():
-                    pass
+            for future in _finished():
                 path = futures[future]
                 completed += 1
                 try:
@@ -240,6 +269,13 @@ def convert_batch(
                     converter_times[conv] = converter_times.get(conv, 0.0) + fr.elapsed_s
                 phase = "done" if fr.status in ("ok", "skipped") else "failed"
                 _notify(completed, path.name, phase)
+        except KeyboardInterrupt:
+            # Ctrl+C: drop the queue, wait only for files already running
+            for f in futures:
+                f.cancel()
+            raise
+        finally:
+            executor.shutdown(wait=True)
     else:
         # Sequential mode: report "converting" before each file
         for i, path in enumerate(files):

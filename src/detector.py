@@ -173,24 +173,21 @@ def classify_pdf(path: Path, chars_per_page_threshold: float = 30.0) -> FormatNa
         Default 30.0 — empirically derived from a 106-book corpus.
     """
     try:
-        import pdfplumber
+        import pymupdf
     except ImportError:
         # Can't classify — assume text, let pdf_text converter try
         return "pdf_text"
 
     try:
-        with pdfplumber.open(str(path)) as pdf:
-            total_chars = 0
-            pages = pdf.pages
-            if not pages:
+        with pymupdf.open(str(path)) as doc:
+            n = doc.page_count
+            if n == 0:
                 return "pdf_text"
-            for page in pages[:10]:  # Sample first 10 pages for speed
-                text = page.extract_text()
-                if text:
-                    total_chars += len(text)
-            sample_pages = min(10, len(pages))
-            avg_chars = total_chars / sample_pages if sample_pages > 0 else 0
-            if avg_chars < chars_per_page_threshold:
+            # 10 pages spread over the whole book — the first pages are often
+            # image-only covers/plates and would misclassify text PDFs as scans.
+            sample = sorted({i * n // 10 for i in range(10)})
+            total_chars = sum(len(doc[i].get_text("text").strip()) for i in sample)
+            if total_chars / len(sample) < chars_per_page_threshold:
                 return "pdf_scan"
             return "pdf_text"
     except Exception:

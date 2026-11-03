@@ -1,8 +1,7 @@
-"""PDF (text layer) → Markdown via pdfplumber, with PyMuPDF fallback.
+"""PDF (text layer) → Markdown via PyMuPDF, with pdfplumber fallback.
 
-Primary: pdfplumber — handles tables, columns, and text flow well.
-Fallback: PyMuPDF (fitz) — more robust at opening malformed PDFs,
-    handles encrypted PDFs better, and catches files pdfplumber rejects.
+Primary: PyMuPDF — ~20x faster, robust with malformed/encrypted PDFs.
+Fallback: pdfplumber — for fonts/encodings PyMuPDF yields no text for.
 
 If both fail, we try OCR as a last resort (delegates to pdf_ocr converter).
 """
@@ -60,7 +59,7 @@ def _pymupdf_extract(path: Path) -> tuple[str, int, int]:
 
 @register
 class _PdfTextConverter:
-    label = "PDF text (pdfplumber / PyMuPDF fallback)"
+    label = "PDF text (PyMuPDF / pdfplumber fallback)"
 
     @staticmethod
     def can_handle(fmt: FormatName) -> bool:
@@ -69,21 +68,21 @@ class _PdfTextConverter:
     @staticmethod
     def check_deps() -> list[str]:
         missing = []
-        # pdfplumber (primary)
+        # PyMuPDF (primary)
+        try:
+            import pymupdf  # noqa: F401
+        except ImportError:
+            missing.append(
+                "PyMuPDF not installed (primary PDF engine).\n"
+                "  Fix:  pip install PyMuPDF"
+            )
+        # pdfplumber (fallback)
         try:
             import pdfplumber  # noqa: F401
         except ImportError:
             missing.append(
-                "pdfplumber not installed.\n"
+                "pdfplumber not installed (fallback).\n"
                 "  Fix:  pip install pdfplumber"
-            )
-        # PyMuPDF (fallback) — optional but strongly recommended
-        try:
-            import pymupdf as fitz  # noqa: F401
-        except ImportError:
-            missing.append(
-                "PyMuPDF not installed (optional fallback).\n"
-                "  Fix:  pip install PyMuPDF"
             )
         return missing
 
@@ -92,17 +91,19 @@ class _PdfTextConverter:
         text = ""
         total_pages = 0
         total_chars = 0
-        method = "pdfplumber"
+        method = "PyMuPDF"
 
-        # Primary: pdfplumber
+        # Primary: PyMuPDF — ~20x faster than pdfplumber at the same text yield
+        # (measured: 267-page book 1.5s vs 33s) and fewer merged words.
         try:
-            text, total_pages, total_chars = _pdfplumber_extract(path)
+            text, total_pages, total_chars = _pymupdf_extract(path)
+            if total_chars == 0:
+                raise ValueError("PyMuPDF extracted no text")
         except Exception as e1:
-            # Fallback 1: PyMuPDF
+            # Fallback 1: pdfplumber (odd fonts/encodings PyMuPDF can't map)
             try:
-                import pymupdf as fitz  # noqa: F811
-                text, total_pages, total_chars = _pymupdf_extract(path)
-                method = "PyMuPDF (pdfplumber failed)"
+                text, total_pages, total_chars = _pdfplumber_extract(path)
+                method = "pdfplumber (PyMuPDF failed)"
             except Exception as e2:
                 # Fallback 2: Try OCR
                 try:
@@ -111,8 +112,8 @@ class _PdfTextConverter:
                 except Exception as e3:
                     raise RuntimeError(
                         f"All PDF extraction methods failed for {path.name}:\n"
-                        f"  pdfplumber: {e1}\n"
-                        f"  PyMuPDF: {e2}\n"
+                        f"  PyMuPDF: {e1}\n"
+                        f"  pdfplumber: {e2}\n"
                         f"  OCR: {e3}"
                     ) from e3
 

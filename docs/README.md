@@ -11,9 +11,9 @@ mdmaker books/ -o markdown/ -j 4 --recursive
 
 | Format | Engine | Requires |
 |--------|--------|----------|
-| EPUB | Calibre `ebook-convert` | [Calibre](https://calibre-ebook.com) |
-| MOBI / PRC | Calibre (MOBI→EPUB→TXT) | Calibre |
-| PDF (text) | PyMuPDF (fitz) — fast | — |
+| EPUB | ebooklib + BeautifulSoup (pure Python) | — |
+| MOBI / AZW / AZW3 / PRC / LIT | Calibre (→EPUB) + ebooklib | [Calibre](https://calibre-ebook.com) |
+| PDF (text) | PyMuPDF, pdfplumber fallback | — |
 | PDF (scanned) | PyMuPDF + Tesseract OCR | [Tesseract](https://github.com/UB-Mannheim/tesseract) |
 | DOCX | python-docx | — |
 | DOC | Word COM (Windows) / LibreOffice (Linux, planned v0.4) | Word or [LibreOffice](https://www.libreoffice.org) |
@@ -34,7 +34,7 @@ pip install -e ".[all]"
 
 | Tool | Needed for | Install |
 |------|-----------|---------|
-| Calibre | EPUB, MOBI, PRC | `winget install calibre` |
+| Calibre | MOBI, AZW, AZW3, PRC, LIT (not EPUB) | `winget install calibre.calibre` |
 | Tesseract OCR | Scanned PDFs | `winget install tesseract-ocr.tesseract` + download `eng.traineddata` |
 | DjVuLibre | DJVU | `winget install DjVuLibre.DjView` |
 | 7-Zip | CHM | `winget install 7zip.7zip` |

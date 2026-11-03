@@ -9,6 +9,26 @@ dept: research
 
 All notable changes to mdmaker.
 
+## [0.5.2] — 2026-11-03
+
+### Performance
+- **PDF: PyMuPDF ist jetzt der Standardweg, pdfplumber nur noch Fallback.** Gemessen an 30 echten Büchern (AUFRUHR): **1258 s → 27 s Wandzeit bei `-j 6` (rund 47×)**, gleiche Textmenge (99–108 % pro Datei), weniger zusammengeklebte Wörter. pdfplumber ist reines Python und blockierte über die GIL auch parallele EPUB-Jobs (EPUB: 3126 s Wartezeit → 24 s).
+- **Scan-Erkennung (`classify_pdf`) über PyMuPDF** statt pdfplumber; die 10 Stichprobenseiten sind jetzt über das ganze Buch verteilt statt die ersten 10, damit Cover und Bildtafeln Text-PDFs nicht als Scan einstufen.
+- **Vorhandene `.md` wird vor Erkennung und Klassifizierung übersprungen** — Wiederholungsläufe über große Ordner sind sofort fertig.
+
+### Stability
+- **Atomare Ausgabe:** Jede Konvertierung schreibt in einen privaten Temp-Ordner und wird per `os.replace` an ihren Platz gelegt. Absturz, Strg+C oder Abbruch hinterlassen keine halbe `.md` mehr, die der nächste Lauf als „fertig" überspringen würde. Zwischendateien (`.txt` von djvu/doc) landen nicht mehr im Ausgabeordner.
+- **GUI-Abbruch im Parallelmodus wirkt jetzt** (vorher `if cancel_event.is_set(): pass`): Die Warteschlange wird verworfen, laufende Dateien enden sauber.
+- **Strg+C bei `-j >1`** wartet nur noch auf die schon laufenden Dateien, nicht mehr auf die ganze Warteschlange.
+- Fehlermeldungen enthalten den Exception-Typ.
+- Skip-Prüfung und Konverter nutzen denselben bereinigten Dateinamen (`sanitize_filename`).
+
+### Dependencies
+- `PyMuPDF>=1.24.3` ist jetzt Kern-Abhängigkeit (vorher nur im `ocr`-Extra).
+
+### Tests
+- Neu: `tests/test_pipeline_stability.py` (atomare Ausgabe, Skip vor Erkennung, Abbruch im Parallelmodus, PyMuPDF als Standard). Der Abbruch-Test hat beim Entwickeln einen Deadlock gefunden: `executor.shutdown(cancel_futures=True)` weckt `as_completed` nicht. Suite: 14/14 grün.
+
 ## [0.5.1] — 2026-11-03
 
 ### Fixed

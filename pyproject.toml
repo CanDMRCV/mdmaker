@@ -1,6 +1,6 @@
 [project]
 name = "mdmaker"
-version = "0.5.1"
+version = "0.5.2"
 description = "Multi-format e-book to Markdown converter — pandoc for e-books (GUI + CLI)"
 readme = "docs/README.md"
 license = {text = "Apache-2.0"}
@@ -20,6 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "PyMuPDF>=1.24.3",
     "pdfplumber>=0.7",
     "tqdm>=4.60",
     "ebooklib>=0.18",
@@ -28,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ocr = ["PyMuPDF>=1.24.3", "pytesseract>=0.3", "Pillow>=9.0"]
+ocr = ["pytesseract>=0.3", "Pillow>=9.0"]
 docx = ["python-docx>=0.8"]
 security = ["defusedxml>=0.7"]
 gui = ["PySide6>=6.5"]
