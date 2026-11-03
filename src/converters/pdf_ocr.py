@@ -55,7 +55,7 @@ class _PdfOcrConverter:
     def check_deps() -> list[str]:
         missing = []
         try:
-            import fitz  # noqa: F401
+            import pymupdf as fitz  # noqa: F401
         except ImportError:
             missing.append("PyMuPDF not installed.\n  Fix: pip install PyMuPDF")
         try:
@@ -74,7 +74,7 @@ class _PdfOcrConverter:
 
     @staticmethod
     def convert(path: Path, output_dir: Path) -> Path:
-        import fitz
+        import pymupdf as fitz
         import pytesseract
         from PIL import Image
         import io

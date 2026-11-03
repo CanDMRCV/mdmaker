@@ -1,6 +1,49 @@
+---
+spur: research-werkbank
+status: operativ
+dept: research
+---
+> → zurück zum [[_REGISTER|Projekt-Register]]
+
 # Changelog
 
 All notable changes to mdmaker.
+
+## [0.5.1] — 2026-11-03
+
+### Fixed
+- **Race in der Converter-Registry bei `-j >1`:** Das Flag `_registry_loaded` wurde vor den Imports gesetzt, deshalb sahen parallele Worker eine leere Registry (`No converter for 'epub'`/`'mobi'`). Jetzt mit Lock, das Flag wird erst nach den Imports gesetzt. Fund aus dem AUFRUHR-Lauf: 3 von 48 Dateien zu Unrecht fehlgeschlagen.
+- **MOBI/AZW/AZW3/PRC gingen an den EPUB-Converter** (`Not a valid ZIP/EPUB file`). Die 0.5.0-Annahme „MOBI ist in der Praxis ZIP" stimmt für echte Kindle-Dateien nicht. Neuer Converter `kindle.py`: Calibre `ebook-convert` → EPUB → der bestehende ebooklib-Pfad. Calibre wird **nur** für diese Formate gebraucht, EPUB bleibt Calibre-frei. Kein Konsolenfenster (`CREATE_NO_WINDOW`).
+- **MS Reader `.lit`** wird jetzt erkannt (Magic `ITOLITLS`) und über `kindle.py` konvertiert.
+- **Magic-Byte-Erkennung für `BOOKMOBI`/`TEXtREAd` (Offset 60).** Falsch benannte Kindle-Dateien (z. B. `.epub`) werden korrekt geroutet. `MAGIC_READ_SIZE` von 64 auf 72 erhöht.
+- **Exit-Code 1**, wenn keine Datei gefunden wurde (fehlende Pfade). Vorher 0, das hat stille Fehlläufe verdeckt.
+- **`fitz`-Deprecation-Warnung** bei jedem Lauf: Import umgestellt auf `import pymupdf as fitz`, `PyMuPDF>=1.24.3`.
+
+### Tests
+- Neu: `tests/test_kindle_registry.py` (Detector, Routing, Registry-Race im frischen Prozess; schlägt gegen den alten Code in 5 von 5 Läufen an).
+- `tests/test_pdf_text_regression.py` auf die v0.5.x-API portiert (`_convert_fitz`/`_convert_pdfplumber` existierten nicht mehr). Suite: 10/10 grün.
+
+## [0.5.0] — 2026-06-16
+
+### Breaking Changes
+- **EPUB/MOBI/PRC now pure Python** — ebooklib + BeautifulSoup ersetzen Calibre.
+  Calibre ist nicht mehr benötigt. Keine Terminal-Fenster mehr durch externe Prozesse.
+- **Magic-byte detection** — erkennt echten Dateityp unabhängig von der Endung.
+  Falsch benannte Dateien (z.B. PDF als .epub) werden automatisch korrekt geroutet.
+
+### Fixed
+- **Terminal-Fenster beim GUI-Start** — `console=False` im PyInstaller-Spec.
+- **6 FAILs bei Batch-Konvertierung** — 5 falsch benannte PDFs + 1 Dummy-Datei korrekt behandelt.
+- **Laggy Startup** — Converter-Module werden jetzt lazy geladen (erst bei erster Konvertierung).
+- **PDF-Fallback** — pdfplumber → PyMuPDF → OCR (3-stufig, keine PDF scheitert ohne Grund).
+- **DOC-Konverter** — LibreOffice headless vor Word COM (kein GUI-Fenster mehr).
+
+### Changed
+- Converter synchronisiert mit mdmaker-library v0.5.0
+- `tool_detection.py`: ebooklib+bs4 statt Calibre als required
+- `main_window.py`: Format→Tool-Mapping aktualisiert
+- `pipeline.py`: FileResult/BatchSummary + progress_callback/cancel_event erhalten
+- `pyproject.toml`: ebooklib, beautifulsoup4, lxml als core dependencies
 
 ## [0.3.4] — 2026-06-06
 

@@ -39,7 +39,8 @@ class _Signals(QObject):
     file_done = Signal(object)
     finished = Signal(object)
     scan_done = Signal(list, int)
-    tools_checked = Signal()  # refresh tool bar after background check
+    tools_checked = Signal()
+    error = Signal(str)  # worker thread crash → show in UI
 
 
 class _ScanWorker(QThread):
@@ -68,16 +69,20 @@ class ConvertWorker(QThread):
         self._cancel.set()
 
     def run(self):
-        def cb(c, t, f, p):
-            self.signals.progress.emit(c, t, f, p)
-        summary = convert_batch(
-            self.paths, self.output_dir,
-            recursive=self.recursive, jobs=self.jobs, force=self.force,
-            progress_callback=cb, cancel_event=self._cancel,
-        )
-        for fr in summary.results:
-            self.signals.file_done.emit(fr)
-        self.signals.finished.emit(summary)
+        try:
+            def cb(c, t, f, p):
+                self.signals.progress.emit(c, t, f, p)
+            summary = convert_batch(
+                self.paths, self.output_dir,
+                recursive=self.recursive, jobs=self.jobs, force=self.force,
+                progress_callback=cb, cancel_event=self._cancel,
+            )
+            for fr in summary.results:
+                self.signals.file_done.emit(fr)
+            self.signals.finished.emit(summary)
+        except Exception as e:
+            import traceback
+            self.signals.error.emit(f"Conversion crashed:\n{traceback.format_exc()}")
 
 
 class MainWindow(QMainWindow):
@@ -286,6 +291,7 @@ class MainWindow(QMainWindow):
         self._worker.signals.progress.connect(self._on_progress)
         self._worker.signals.file_done.connect(self._on_file_done)
         self._worker.signals.finished.connect(self._on_finished)
+        self._worker.signals.error.connect(self._on_worker_error)
 
         self._results_view.clear(); self._result_text = ""
         self._progress_bar.setMaximum(100); self._progress_bar.setValue(0)
@@ -317,8 +323,8 @@ class MainWindow(QMainWindow):
         else:
             color = "#dc3545"
             # Map format to tool for remedy hint
-            fmts = {"pdf_scan": "tesseract", "epub": "calibre", "mobi": "calibre",
-                    "djvu": "djvu", "chm": "7zip"}
+            fmts = {"pdf_scan": "tesseract", "epub": "ebooklib", "mobi": "ebooklib",
+                    "prc": "ebooklib", "djvu": "djvu", "chm": "7zip"}
             tool = ALL_TOOLS.get(fmts.get(fr.format_detected, ""))
             hint = ""
             if tool and tool.install_cmd:
@@ -357,6 +363,15 @@ class MainWindow(QMainWindow):
             tr(f"Done: {s.ok} OK, {s.skipped} skipped, {s.failed} failed — {s.elapsed_s:.1f}s"))
         self._status_bar.showMessage(
             f"OK: {s.ok} | SKIP: {s.skipped} | FAIL: {s.failed} | {s.elapsed_s:.1f}s")
+
+    def _on_worker_error(self, msg: str):
+        self._progress_detail.setText(tr("Error — see details below"))
+        self._start_btn.setEnabled(True); self._cancel_btn.setEnabled(False)
+        self._worker = None
+        self._results_view.setHtml(
+            f"<pre style='font-family:Consolas; font-size:9pt; color:#dc3545; "
+            f"white-space:pre-wrap;'>{msg}</pre>")
+        QMessageBox.critical(self, tr("Conversion Error"), msg)
 
     def _copy_results(self):
         QApplication.clipboard().setText(self._result_text)

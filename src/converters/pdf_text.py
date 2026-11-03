@@ -1,22 +1,66 @@
-"""PDF (text layer) → Markdown (B4: PyMuPDF primary, pdfplumber fallback).
+"""PDF (text layer) → Markdown via pdfplumber, with PyMuPDF fallback.
 
-Performance measurement (Rücklauf 3): pdfplumber = 37.4s, PyMuPDF = 3.9s
-for the same corpus. PyMuPDF (fitz) is ~10× faster for pure text extraction.
-pdfplumber retained as fallback for complex tables/layouts.
+Primary: pdfplumber — handles tables, columns, and text flow well.
+Fallback: PyMuPDF (fitz) — more robust at opening malformed PDFs,
+    handles encrypted PDFs better, and catches files pdfplumber rejects.
 
-Beleg-Block: PyMuPDF backed by MuPDF (Artifex), industry-standard PDF engine.
-Quality parity validated on 20-file test corpus — identical text output.
+If both fail, we try OCR as a last resort (delegates to pdf_ocr converter).
 """
 
 from pathlib import Path
 
 from ..detector import FormatName
-from . import Converter, register
+from . import Converter, register, sanitize_filename
+
+
+def _pdfplumber_extract(path: Path) -> tuple[str, int, int]:
+    """Extract text via pdfplumber. Returns (text, num_pages, total_chars)."""
+    import pdfplumber
+
+    with pdfplumber.open(str(path)) as pdf:
+        pages = pdf.pages
+        if not pages:
+            return ("", 0, 0)
+        text_parts = []
+        total_chars = 0
+        for i, page in enumerate(pages):
+            try:
+                text = page.extract_text()
+                if text:
+                    text_parts.append(f"\n## Page {i + 1}\n\n{text}\n")
+                    total_chars += len(text)
+            except Exception:
+                # Skip pages that fail to extract
+                continue
+        return ("\n".join(text_parts), len(pages), total_chars)
+
+
+def _pymupdf_extract(path: Path) -> tuple[str, int, int]:
+    """Extract text via PyMuPDF (fitz). Fallback when pdfplumber fails."""
+    import pymupdf as fitz
+
+    doc = fitz.open(str(path))
+    total_pages = len(doc)
+    text_parts = []
+    total_chars = 0
+
+    for i in range(total_pages):
+        try:
+            page = doc[i]
+            text = page.get_text("text")
+            if text and text.strip():
+                text_parts.append(f"\n## Page {i + 1}\n\n{text.strip()}\n")
+                total_chars += len(text)
+        except Exception:
+            continue
+
+    doc.close()
+    return ("\n".join(text_parts), total_pages, total_chars)
 
 
 @register
 class _PdfTextConverter:
-    label = "PDF text (PyMuPDF / pdfplumber)"
+    label = "PDF text (pdfplumber / PyMuPDF fallback)"
 
     @staticmethod
     def can_handle(fmt: FormatName) -> bool:
@@ -25,72 +69,64 @@ class _PdfTextConverter:
     @staticmethod
     def check_deps() -> list[str]:
         missing = []
+        # pdfplumber (primary)
         try:
-            import fitz  # noqa: F401
+            import pdfplumber  # noqa: F401
         except ImportError:
-            missing.append("PyMuPDF (fitz) not installed.\n  Fix: pip install PyMuPDF")
+            missing.append(
+                "pdfplumber not installed.\n"
+                "  Fix:  pip install pdfplumber"
+            )
+        # PyMuPDF (fallback) — optional but strongly recommended
+        try:
+            import pymupdf as fitz  # noqa: F401
+        except ImportError:
+            missing.append(
+                "PyMuPDF not installed (optional fallback).\n"
+                "  Fix:  pip install PyMuPDF"
+            )
         return missing
 
     @staticmethod
-    def convert(path: Path, output_dir: Path, *,
-                engine: str = "fitz") -> Path:
-        """Convert PDF to Markdown. engine='fitz' (fast, default) or 'pdfplumber'."""
-        if engine == "fitz":
-            return _PdfTextConverter._convert_fitz(path, output_dir)
-        return _PdfTextConverter._convert_pdfplumber(path, output_dir)
-
-    @staticmethod
-    def _convert_fitz(path: Path, output_dir: Path) -> Path:
-        """PyMuPDF (fitz) — ~10× faster than pdfplumber (B4 measurement)."""
-        import fitz
-
-        doc = fitz.open(str(path))
-        parts = []
+    def convert(path: Path, output_dir: Path) -> Path:
+        text = ""
+        total_pages = 0
         total_chars = 0
-        total_pages = len(doc)
+        method = "pdfplumber"
 
-        for i in range(total_pages):
-            page = doc[i]
-            text = page.get_text()
-            if text and text.strip():
-                parts.append(f"\n## Page {i + 1}\n\n{text}\n")
-                total_chars += len(text)
+        # Primary: pdfplumber
+        try:
+            text, total_pages, total_chars = _pdfplumber_extract(path)
+        except Exception as e1:
+            # Fallback 1: PyMuPDF
+            try:
+                import pymupdf as fitz  # noqa: F811
+                text, total_pages, total_chars = _pymupdf_extract(path)
+                method = "PyMuPDF (pdfplumber failed)"
+            except Exception as e2:
+                # Fallback 2: Try OCR
+                try:
+                    from .pdf_ocr import _PdfOcrConverter
+                    return _PdfOcrConverter.convert(path, output_dir)
+                except Exception as e3:
+                    raise RuntimeError(
+                        f"All PDF extraction methods failed for {path.name}:\n"
+                        f"  pdfplumber: {e1}\n"
+                        f"  PyMuPDF: {e2}\n"
+                        f"  OCR: {e3}"
+                    ) from e3
 
-        doc.close()
+        if total_chars == 0:
+            raise ValueError(
+                f"No text content extracted from PDF: {path.name}. "
+                f"The file may be image-only (try --force to route through OCR)."
+            )
 
-        md_path = output_dir / (path.stem + ".md")
-        title = path.stem
+        md_path = output_dir / (sanitize_filename(path.stem) + ".md")
         header = (
-            f"# {title}\n\n"
-            f"> {total_pages} pages · "
-            f"{total_chars:,} chars · Converted via PyMuPDF (fitz)\n\n"
-        )
-        md_path.write_text(header + "\n".join(parts), encoding="utf-8")
-        return md_path
-
-    @staticmethod
-    def _convert_pdfplumber(path: Path, output_dir: Path) -> Path:
-        """pdfplumber — slower but better for complex tables/layouts (fallback)."""
-        import pdfplumber
-
-        with pdfplumber.open(str(path)) as pdf:
-            pages = pdf.pages
-            total_pages = len(pages)
-            parts = []
-            total_chars = 0
-
-            for i, page in enumerate(pages):
-                text = page.extract_text()
-                if text:
-                    parts.append(f"\n## Page {i + 1}\n\n{text}\n")
-                    total_chars += len(text)
-
-        md_path = output_dir / (path.stem + ".md")
-        title = path.stem
-        header = (
-            f"# {title}\n\n"
+            f"# {path.stem}\n\n"
             f"> {total_pages} pages · {total_chars:,} chars · "
-            f"Converted via pdfplumber\n\n"
+            f"Converted via {method}\n\n"
         )
-        md_path.write_text(header + "\n".join(parts), encoding="utf-8")
+        md_path.write_text(header + text, encoding="utf-8")
         return md_path

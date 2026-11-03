@@ -73,6 +73,10 @@ Examples:
         recursive=args.recursive, jobs=args.jobs,
     )
 
+    # Nothing found (missing paths / no supported files) is an error, not success
+    if summary.total == 0:
+        return 1
+
     # Summary (BatchSummary is a dataclass now)
     if args.dry_run:
         print(f"\n[*] Dry run: {summary.total} file(s) would be processed.")

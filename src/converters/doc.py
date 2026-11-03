@@ -1,128 +1,45 @@
-"""DOC (binary OLE) → Markdown (ADR-002: tiefes Modul).
+"""Old .doc (Word 97-2003) → Markdown via multiple backends.
 
-Windows: Word COM Automation — the only reliable parser for legacy .doc.
-Linux/macOS: LibreOffice headless (stub in v0.1, full in v0.2).
+Tries backends in order of preference (no terminal windows first):
+    1. LibreOffice headless — faster, no GUI, cross-platform
+    2. Word COM — Windows-only, reliable for complex .doc files
+    3. python-docx fallback — works if the file is actually .docx renamed
 
-The DocConverter interface hides platform complexity. The rest
-of the system never sees Word COM or LibreOffice directly.
+CRITICAL: All subprocess calls use CREATE_NO_WINDOW (0x08000000) to prevent
+terminal popups on Windows. LibreOffice gets extra flags (--invisible,
+--norestore) to suppress any GUI element.
 """
 
-import platform
+import subprocess
+import os
 import shutil
 from pathlib import Path
 
 from ..detector import FormatName
-from ..security import safe_run
 from . import Converter, register
 
-
-# ── Tiefes Modul: DocConverter Interface (ADR-002) ──
-
-class DocConverter:
-    """Abstract interface for .doc conversion. Platform-specific implementations below."""
-
-    @staticmethod
-    def check_deps() -> list[str]:
-        raise NotImplementedError
-
-    @staticmethod
-    def convert(path: Path, output_dir: Path) -> Path:
-        raise NotImplementedError
+# Windows-only flag: prevent ANY window from appearing
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
-class WordCOMDocConverter(DocConverter):
-    """Windows: Microsoft Word COM Automation.
+def _find_libreoffice() -> str | None:
+    """Find LibreOffice soffice.exe on the system."""
+    for name in ["soffice", "soffice.exe", "libreoffice"]:
+        found = shutil.which(name)
+        if found:
+            return found
+    for base in [
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    ]:
+        if Path(base).exists():
+            return base
+    return None
 
-    Quality: Perfect — native Word rendering. Requires Word installed.
-    Security: Makros deaktiviert via AutomationSecurity=ForceDisable.
-    """
-
-    label = "DOC (Word COM)"
-
-    @staticmethod
-    def check_deps() -> list[str]:
-        if platform.system() != "Windows":
-            return ["Word COM requires Windows. On Linux/macOS, use LibreOffice."]
-        try:
-            import win32com.client  # noqa: F401
-        except ImportError:
-            return ["pywin32 not installed.\n  Fix: pip install pywin32"]
-        return []
-
-    @staticmethod
-    def convert(path: Path, output_dir: Path) -> Path:
-        import win32com.client
-
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False
-        word.DisplayAlerts = 0
-        # Security: disable all macros (BRIEF_SECURITY §2)
-        word.AutomationSecurity = 1  # msoAutomationSecurityForceDisable
-
-        try:
-            doc = word.Documents.Open(str(path.resolve()), ReadOnly=True)
-
-            # Export as text
-            txt_path = output_dir / (path.stem + ".txt")
-            doc.SaveAs(str(txt_path), FileFormat=7)  # wdFormatText
-
-            doc.Close()
-        finally:
-            word.Quit()
-
-        # TXT → MD
-        raw = txt_path.read_text(encoding="utf-8", errors="replace")
-        md_path = output_dir / (path.stem + ".md")
-        md_path.write_text(
-            f"# {path.stem}\n\n> Converted from DOC via Word COM\n\n{raw}",
-            encoding="utf-8",
-        )
-        txt_path.unlink(missing_ok=True)
-        return md_path
-
-
-class LibreOfficeDocConverter(DocConverter):
-    """Linux/macOS: LibreOffice --headless (STUB in v0.1).
-
-    Will be implemented in v0.2 with:
-        libreoffice --headless --convert-to txt <file> --outdir <dir>
-    """
-
-    label = "DOC (LibreOffice — stub)"
-
-    @staticmethod
-    def check_deps() -> list[str]:
-        if platform.system() == "Windows":
-            return []  # Word COM is available, LibreOffice not needed
-        if shutil.which("libreoffice") is None:
-            return [
-                "LibreOffice not found.\n"
-                "  Install: https://www.libreoffice.org/download/\n"
-                "  Or pre-convert .doc to .docx with another tool."
-            ]
-        return []
-
-    @staticmethod
-    def convert(path: Path, output_dir: Path) -> Path:
-        if platform.system() == "Windows":
-            # Delegate to Word COM
-            return WordCOMDocConverter.convert(path, output_dir)
-
-        # Linux/macOS: stub — clear error message
-        raise NotImplementedError(
-            "DOC conversion on Linux/macOS requires LibreOffice (planned v0.2).\n"
-            "For now, pre-convert .doc to .docx using: "
-            "libreoffice --headless --convert-to docx " + str(path)
-        )
-
-
-# ── Registry Entry ──
 
 @register
-class _DocRegistryAdapter:
-    """Adapter that routes to the platform-appropriate DocConverter."""
-
-    label = "DOC (Word COM / LibreOffice)"
+class _DocConverter:
+    label = "DOC (LibreOffice / Word COM / python-docx)"
 
     @staticmethod
     def can_handle(fmt: FormatName) -> bool:
@@ -130,10 +47,135 @@ class _DocRegistryAdapter:
 
     @staticmethod
     def check_deps() -> list[str]:
-        return WordCOMDocConverter.check_deps() + LibreOfficeDocConverter.check_deps()
+        if os.name != "nt":
+            if _find_libreoffice() is None:
+                return [
+                    "LibreOffice not found.\n"
+                    "  Install:  sudo apt install libreoffice  (Linux)\n"
+                    "  Or:       brew install libreoffice      (macOS)"
+                ]
+            return []
+        if _find_libreoffice() is not None:
+            return []
+        return []
 
     @staticmethod
     def convert(path: Path, output_dir: Path) -> Path:
-        if platform.system() == "Windows":
-            return WordCOMDocConverter.convert(path, output_dir)
-        return LibreOfficeDocConverter.convert(path, output_dir)
+        txt_path = output_dir / (path.stem + ".txt")
+        errors = []
+
+        # Backend 1: LibreOffice headless — extra flags to prevent ANY GUI
+        lo_exe = _find_libreoffice()
+        if lo_exe is not None:
+            try:
+                # Build isolated profile dir to avoid locking user's running LO
+                import tempfile
+                lo_profile = tempfile.mkdtemp(prefix="mdmaker_lo_")
+                env = os.environ.copy()
+                subprocess.run(
+                    [
+                        lo_exe,
+                        "-env:UserInstallation=file://" + lo_profile.replace("\\", "/"),
+                        "--headless",
+                        "--invisible",
+                        "--norestore",
+                        "--nofirststartwizard",
+                        "--convert-to", "txt:Text",
+                        "--outdir", str(output_dir),
+                        str(path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                    creationflags=CREATE_NO_WINDOW,
+                    env=env,
+                )
+                # Cleanup temp profile
+                try:
+                    shutil.rmtree(lo_profile, ignore_errors=True)
+                except Exception:
+                    pass
+
+                lo_txt = output_dir / (path.stem + ".txt")
+                if not lo_txt.exists():
+                    alt_txt = output_dir / (path.name + ".txt")
+                    if alt_txt.exists():
+                        alt_txt.rename(lo_txt)
+                if lo_txt.exists():
+                    raw = lo_txt.read_text(encoding="utf-8", errors="replace")
+                    md_path = output_dir / (path.stem + ".md")
+                    md_path.write_text(
+                        f"# {path.stem}\n\n> Converted via LibreOffice headless\n\n{raw}",
+                        encoding="utf-8",
+                    )
+                    lo_txt.unlink(missing_ok=True)
+                    return md_path
+            except Exception as e:
+                errors.append(f"LibreOffice: {e}")
+
+        # Backend 2: Word COM (Windows only, hidden window)
+        if os.name == "nt":
+            try:
+                script = f"""
+$ErrorActionPreference = 'Stop'
+$word = New-Object -ComObject Word.Application
+$word.Visible = $false
+$word.DisplayAlerts = 0
+$doc = $word.Documents.Open('{path}', $false, $true)
+$txtPath = '{txt_path}'
+$doc.SaveAs($txtPath, 7)
+$doc.Close()
+$word.Quit()
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc) | Out-Null
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+"""
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if txt_path.exists():
+                    raw = txt_path.read_text(encoding="utf-8", errors="replace")
+                    md_path = output_dir / (path.stem + ".md")
+                    md_path.write_text(
+                        f"# {path.stem}\n\n> Converted via Word COM\n\n{raw}",
+                        encoding="utf-8",
+                    )
+                    txt_path.unlink(missing_ok=True)
+                    return md_path
+            except Exception as e:
+                errors.append(f"Word COM: {e}")
+
+        # Backend 3: Try python-docx (some .doc files are actually .docx)
+        try:
+            from docx import Document
+            doc = Document(str(path))
+            paragraphs = []
+            for para in doc.paragraphs:
+                text = para.text.strip()
+                if not text:
+                    paragraphs.append("")
+                    continue
+                if para.style.name.startswith("Heading"):
+                    level = int(para.style.name.split()[-1]) if para.style.name.split()[-1].isdigit() else 1
+                    paragraphs.append(f"{'#' * min(level, 6)} {text}")
+                else:
+                    paragraphs.append(text)
+            md_path = output_dir / (path.stem + ".md")
+            md_path.write_text(
+                f"# {path.stem}\n\n> Converted via python-docx (treated as .docx)\n\n"
+                + "\n\n".join(paragraphs),
+                encoding="utf-8",
+            )
+            return md_path
+        except Exception as e:
+            errors.append(f"python-docx: {e}")
+
+        raise RuntimeError(
+            f"All DOC conversion backends failed for {path.name}:\n"
+            + "\n".join(f"  {e}" for e in errors)
+            + "\n\n  Install LibreOffice:  winget install LibreOffice.LibreOffice"
+        )

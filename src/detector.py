@@ -1,57 +1,182 @@
-"""Format detection and PDF type classification (ADR-001, ADR-005).
+"""Format detection via magic bytes + PDF type classification.
 
-PDF-Heuristik (ADR-005): sample first 10 pages. Average < 30 chars/page
-→ scanned PDF (OCR pipeline). Otherwise text-based (pdfplumber pipeline).
-Calibrated on 106-book corpus; bias: might misclassify image-heavy
-text-PDFs as scans. Logged in conversion metadata.
+Uses magic-byte signatures first, falling back to file extension.
+This handles mislabeled files (e.g., PDF saved as .epub) and detects
+corrupted/dummy files early.
+
+Magic-byte references:
+    https://en.wikipedia.org/wiki/List_of_file_signatures
 """
 
 from pathlib import Path
 from typing import Literal
 
 FormatName = Literal[
-    "epub", "mobi", "prc",
-    "pdf_text", "pdf_scan",
-    "doc", "docx", "djvu", "chm",
-    "xz", "zip",
-    "unknown",
+    "epub", "mobi", "prc", "pdf_text", "pdf_scan",
+    "doc", "docx", "djvu", "chm", "xz", "zip", "lit", "unknown",
 ]
 
-EXTENSION_MAP: dict[str, FormatName] = {
-    ".epub": "epub", ".mobi": "mobi", ".azw": "mobi", ".azw3": "mobi",
-    ".prc": "prc", ".pdf": "pdf_text",  # pdf_text is provisional
-    ".doc": "doc", ".docx": "docx", ".djvu": "djvu", ".chm": "chm",
-    ".xz": "xz", ".zip": "zip",
-}
-
-# Magic-byte signatures for archive inner-format detection (ADR-003)
-MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
-    (b"%PDF-", ".pdf"),
-    (b"PK\x03\x04", ".zip"),       # EPUB/DOCX are ZIP-based
-    (b"AT&TFORM", ".djvu"),        # DJVU (older format)
-    (b"\x00\x00\x00\x0c\x6a\x50", ".jpeg2000"),
+# Magic-byte signatures for common formats.
+# (signature_bytes, offset, label_for_detection)
+MAGIC_SIGNATURES: list[tuple[bytes, int, str]] = [
+    (b"%PDF-", 0, "pdf"),
+    (b"PK\x03\x04", 0, "zip_based"),   # EPUB, DOCX, XZ, ZIP all use ZIP
+    (b"Rar!\x1a\x07", 0, "unknown"),    # RAR — not supported
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 0, "ole"),  # Old .doc (OLE2)
+    (b"AT&TFORM", 0, "djvu"),
+    (b"FORM", 0, "djvu"),               # DJVU alternative
+    (b"\x1f\x8b\x08", 0, "gzip"),       # GZIP (maybe tar.gz)
+    (b"\xfd7zXZ\x00", 0, "xz"),         # XZ
+    (b"<!DOCTYPE html", 0, "html"),     # Mislabeled HTML
+    (b"<html", 0, "html"),              # HTML
+    (b"<?xml", 0, "xml"),               # XML
+    (b"<!doctype html", 0, "html"),     # HTML (case insensitive check below)
+    (b"ITOLITLS", 0, "lit"),             # MS Reader .lit
+    (b"BOOKMOBI", 60, "mobi"),           # Mobipocket / KF8 (.mobi .azw .azw3) — PalmDB type at offset 60
+    (b"TEXtREAd", 60, "prc"),            # PalmDOC (.prc / old .mobi)
 ]
+
+# Minimum file size to be considered valid (in bytes)
+MIN_VALID_SIZE = 100
+
+# Maximum size to read for magic-byte detection
+MAGIC_READ_SIZE = 72  # BOOKMOBI sits at offset 60..68
+
+
+def _read_magic(path: Path) -> bytes:
+    """Read the first MAGIC_READ_SIZE bytes of a file for type detection."""
+    try:
+        with open(str(path), "rb") as f:
+            return f.read(MAGIC_READ_SIZE)
+    except Exception:
+        return b""
+
+
+def detect_by_magic(path: Path) -> str:
+    """Detect format by magic bytes. Returns 'unknown' if no match.
+
+    Handles compound cases:
+    - ZIP-based: EPUB, DOCX, XZ, ZIP all start with PK. We return
+      'zip_based' and let the extension disambiguate.
+    - OLE2: Old .doc format, but also some other MS formats.
+    """
+    magic = _read_magic(path)
+
+    if len(magic) == 0:
+        return "unknown"
+
+    for sig, offset, label in MAGIC_SIGNATURES:
+        if len(magic) >= offset + len(sig):
+            if magic[offset:offset + len(sig)] == sig:
+                if label == "zip_based":
+                    # Check if it's actually XZ (FD 37 7A 58 5A 00)
+                    # XZ files also start with bytes that can match PK in
+                    # some edge cases, but standard XZ has its own signature
+                    return "zip_based"
+                if label == "html":
+                    return "html"
+                return label
+
+    # Case-insensitive HTML check
+    magic_lower = magic[:32].lower()
+    if b"<!doctype html" in magic_lower or b"<html" in magic_lower:
+        return "html"
+    if b"<?xml" in magic_lower:
+        return "xml"
+
+    return "unknown"
 
 
 def detect_format(path: Path) -> FormatName:
-    """Detect initial format by file extension.
+    """Detect the format of a book file.
 
-    PDFs get provisional ``pdf_text`` — call :func:`classify_pdf` next.
+    Uses magic bytes first, then falls back to extension.
+    Handles mislabeled files (e.g., PDF with .epub extension).
+
+    Returns 'unknown' if the file cannot be identified or is too small.
     """
+    # Quick size check
+    try:
+        size = path.stat().st_size
+    except Exception:
+        return "unknown"
+
+    if size < MIN_VALID_SIZE:
+        return "unknown"
+
+    # Step 1: Magic bytes
+    magic_type = detect_by_magic(path)
+
+    # Step 2: Resolve magic type to FormatName
+    if magic_type == "pdf":
+        return "pdf_text"  # Will be classified further by classify_pdf
+    elif magic_type == "djvu":
+        return "djvu"
+    elif magic_type == "html" or magic_type == "xml":
+        # Mislabeled HTML/XML — not a supported book format
+        return "unknown"
+    elif magic_type in ("mobi", "prc", "lit"):
+        return magic_type  # binary, regardless of (often wrong) extension
+    elif magic_type == "ole":
+        return "doc"
+    elif magic_type == "xz":
+        return "xz"
+    elif magic_type == "zip_based":
+        # Disambiguate ZIP-based formats by extension
+        ext = path.suffix.lower()
+        if ext in (".epub", ".mobi", ".prc", ".azw", ".azw3"):
+            return "epub"  # ZIP container with Kindle extension = mislabeled EPUB
+        elif ext == ".docx":
+            return "docx"
+        elif ext == ".zip":
+            return "zip"
+        elif ext == ".xz":
+            return "xz"
+        else:
+            # Unknown ZIP — try extension-based map
+            pass
+    elif magic_type == "gzip":
+        return "unknown"  # tar.gz not supported
+
+    # Step 3: Fallback to extension
     ext = path.suffix.lower()
-    return EXTENSION_MAP.get(ext, "unknown")
+    ext_map: dict[str, FormatName] = {
+        ".epub": "epub",
+        ".mobi": "mobi",
+        ".azw": "mobi",
+        ".azw3": "mobi",
+        ".prc": "prc",
+        ".pdf": "pdf_text",
+        ".doc": "doc",
+        ".docx": "docx",
+        ".djvu": "djvu",
+        ".chm": "chm",
+        ".xz": "xz",
+        ".zip": "zip",
+        ".lit": "lit",
+    }
+    return ext_map.get(ext, "unknown")
 
 
 def classify_pdf(path: Path, chars_per_page_threshold: float = 30.0) -> FormatName:
-    """Sample first 10 pages with pdfplumber to decide text vs. scan.
+    """Open a PDF with pdfplumber to decide whether it's text-based or scanned.
 
-    Returns ``pdf_text`` if average chars/page >= threshold, else ``pdf_scan``.
-    Threshold of 30.0 empirically derived from prior corpus (ADR-005).
+    Returns ``"pdf_text"`` if the average chars/page >= *chars_per_page_threshold*,
+    otherwise ``"pdf_scan"`` (needs OCR).
+
+    Parameters
+    ----------
+    path:
+        Path to the PDF file.
+    chars_per_page_threshold:
+        Minimum average characters per page to classify as text-based.
+        Default 30.0 — empirically derived from a 106-book corpus.
     """
     try:
         import pdfplumber
     except ImportError:
-        return "pdf_text"  # Can't classify — assume text
+        # Can't classify — assume text, let pdf_text converter try
+        return "pdf_text"
 
     try:
         with pdfplumber.open(str(path)) as pdf:
@@ -59,25 +184,14 @@ def classify_pdf(path: Path, chars_per_page_threshold: float = 30.0) -> FormatNa
             pages = pdf.pages
             if not pages:
                 return "pdf_text"
-            sample_pages = min(10, len(pages))
-            for page in pages[:sample_pages]:
+            for page in pages[:10]:  # Sample first 10 pages for speed
                 text = page.extract_text()
                 if text:
                     total_chars += len(text)
-            avg = total_chars / sample_pages if sample_pages > 0 else 0
-            return "pdf_scan" if avg < chars_per_page_threshold else "pdf_text"
+            sample_pages = min(10, len(pages))
+            avg_chars = total_chars / sample_pages if sample_pages > 0 else 0
+            if avg_chars < chars_per_page_threshold:
+                return "pdf_scan"
+            return "pdf_text"
     except Exception:
-        return "pdf_text"
-
-
-def detect_inner_format(raw_path: Path) -> str:
-    """Peek at magic bytes to guess the extension of a decompressed file (ADR-003)."""
-    try:
-        with open(str(raw_path), "rb") as f:
-            magic = f.read(32)
-        for sig, ext in MAGIC_SIGNATURES:
-            if magic.startswith(sig):
-                return ext
-    except OSError:
-        pass
-    return ""
+        return "pdf_text"  # Conservative fallback

@@ -1,11 +1,12 @@
 """Pipeline orchestrator — detection → routing → conversion (ADR-001).
 
-Binds converters via the registry, classifies PDFs, and manages
-parallel execution (ADR-006: ThreadPoolExecutor for I/O-bound work).
-v0.2.1: per-file results, timing, phase-aware progress for GUI.
+v0.5.1: CREATE_NO_WINDOW on all subprocess calls, per-file progress notifications,
+        magic-byte detection, lazy converter imports, PyMuPDF fallback,
+        pure-Python EPUB (no Calibre). Rich FileResult/BatchSummary for GUI.
 """
 
 import sys
+import os
 import time
 import threading
 from dataclasses import dataclass, field
@@ -13,17 +14,26 @@ from pathlib import Path
 from typing import Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Issue #3: Force UTF-8 stdout so tqdm bars render cleanly on Windows
-# (cp1252/cp850 terminals show � artifacts for Unicode chars like ✓/─).
+# Fix for PyInstaller windowed mode (console=False): sys.stdout/stderr are None.
+# tqdm.write() and tqdm() itself crash on None streams. Redirect to devnull.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+try:
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
 from tqdm import tqdm
 
-from .detector import detect_format, classify_pdf
-from .converters import find_converter, REGISTRY
+from .detector import detect_format, classify_pdf, detect_by_magic
+from .converters import find_converter, check_all_deps as _check_all_converter_deps
 
 
 @dataclass
@@ -31,7 +41,7 @@ class FileResult:
     """Per-file conversion result (A1: Fehler-Transparenz)."""
     path: Path
     status: str          # "ok" | "skipped" | "failed"
-    converter: str        # converter label, e.g. "EPUB/MOBI/PRC (Calibre)"
+    converter: str        # converter label
     format_detected: str  # e.g. "epub", "pdf_text", "pdf_scan"
     error: str            # empty if ok/skipped
     elapsed_s: float      # seconds for this file
@@ -47,23 +57,17 @@ class BatchSummary:
     failed: int
     elapsed_s: float
     results: list[FileResult] = field(default_factory=list)
-    # Per-converter timing breakdown (B6)
     converter_times: dict[str, float] = field(default_factory=dict)
 
 
 def check_all_dependencies() -> dict[str, list[str]]:
-    issues: dict[str, list[str]] = {}
-    for conv in REGISTRY:
-        missing = conv.check_deps()
-        if missing:
-            issues[conv.label] = missing
-    return issues
+    return _check_all_converter_deps()
 
 
 def collect_files(paths: list[Path], recursive: bool = False) -> list[Path]:
     SUPPORTED = {
         ".epub", ".mobi", ".azw", ".azw3", ".prc",
-        ".pdf", ".doc", ".docx", ".djvu", ".chm", ".xz", ".zip",
+        ".pdf", ".doc", ".docx", ".djvu", ".chm", ".xz", ".zip", ".lit",
     }
     seen: set[str] = set()
     files: list[Path] = []
@@ -90,15 +94,27 @@ def collect_files(paths: list[Path], recursive: bool = False) -> list[Path]:
 
 def convert_file(path: Path, output_dir: Path,
                  force: bool = False, dry_run: bool = False) -> FileResult:
-    """Convert one file. Returns structured FileResult (A1, B6)."""
+    """Convert one file. Returns structured FileResult."""
     t0 = time.perf_counter()
     fmt = detect_format(path)
     conv_label = "unknown"
     error = ""
 
     if fmt == "unknown":
+        try:
+            size = path.stat().st_size
+        except Exception:
+            size = 0
+        if size < 100:
+            error = f"Skipping tiny file ({size} bytes)"
+        else:
+            magic_type = detect_by_magic(path)
+            if magic_type == "html":
+                error = "Not a book file (HTML detected)"
+            else:
+                error = f"Unknown format (magic: {magic_type or 'none'}, ext: {path.suffix})"
         return FileResult(path=path, status="failed", converter="—",
-                          format_detected="unknown", error="Unknown format",
+                          format_detected="unknown", error=error,
                           elapsed_s=time.perf_counter() - t0)
 
     if fmt == "pdf_text":
@@ -109,46 +125,56 @@ def convert_file(path: Path, output_dir: Path,
         return FileResult(path=path, status="failed", converter="—",
                           format_detected=fmt, error=f"No converter for '{fmt}'",
                           elapsed_s=time.perf_counter() - t0)
-    conv_label = converter.label
 
+    conv_label = converter.label
     md_path = output_dir / (path.stem + ".md")
-    if md_path.exists() and md_path.stat().st_size > 100 and not force:
+
+    if md_path.exists() and not force:
         return FileResult(path=path, status="skipped", converter=conv_label,
                           format_detected=fmt, error="",
                           elapsed_s=time.perf_counter() - t0, output_md=md_path)
 
     if dry_run:
+        tqdm.write(f"   [*] Would convert [{conv_label}]: {path.name}")
         return FileResult(path=path, status="skipped", converter=conv_label,
-                          format_detected=fmt, error="[dry-run]",
-                          elapsed_s=time.perf_counter() - t0)
+                          format_detected=fmt, error="",
+                          elapsed_s=time.perf_counter() - t0, output_md=md_path)
 
     try:
         result = converter.convert(path, output_dir)
-        elapsed = time.perf_counter() - t0
         ok = result is not None and result.exists() and result.stat().st_size > 100
-        return FileResult(
-            path=path, status="ok" if ok else "failed",
-            converter=conv_label, format_detected=fmt,
-            error="" if ok else "Output empty or missing",
-            elapsed_s=elapsed, output_md=result if ok else None,
-        )
+        return FileResult(path=path,
+                          status="ok" if ok else "failed",
+                          converter=conv_label, format_detected=fmt,
+                          error="" if ok else "Output too small or missing",
+                          elapsed_s=time.perf_counter() - t0,
+                          output_md=result if ok else None)
     except Exception as e:
         return FileResult(path=path, status="failed", converter=conv_label,
-                          format_detected=fmt, error=str(e)[:200],
+                          format_detected=fmt, error=str(e),
                           elapsed_s=time.perf_counter() - t0)
 
 
 def convert_batch(
-    paths: list[Path], output_dir: Path, *,
-    force: bool = False, dry_run: bool = False,
-    recursive: bool = False, jobs: int = 1,
+    paths: list[Path],
+    output_dir: Path,
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    recursive: bool = False,
+    jobs: int = 1,
     progress_callback: Optional[Callable[[int, int, str, str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> BatchSummary:
-    """Convert a batch with progress, timing, and per-file results.
+    """Convert a batch of files with progress reporting.
 
-    progress_callback signature: (current, total, filename, phase)
-    Phase is one of: "scanning", "converting", "ocr", "extracting", "done"
+    progress_callback receives (current, total, filename, phase) where:
+      - current: files completed so far (or being processed)
+      - total: total files
+      - filename: name of file being processed
+      - phase: "converting" | "done" | "failed"
+
+    Files that already have output (skipped) are reported as "done" immediately.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     files = collect_files(paths, recursive=recursive)
@@ -160,71 +186,82 @@ def convert_batch(
     tqdm.write(f"Found {len(files)} file(s) to process.\n")
 
     start = time.perf_counter()
+    ok = 0
+    skipped = 0
+    failed = 0
     results: list[FileResult] = []
     converter_times: dict[str, float] = {}
+    total_files = len(files)
+
+    def _notify(current: int, filename: str, phase: str):
+        if progress_callback:
+            try:
+                progress_callback(current, total_files, filename, phase)
+            except Exception:
+                pass
 
     if jobs > 1:
         tqdm.write(f"Using {jobs} parallel workers.\n")
         with ThreadPoolExecutor(max_workers=jobs) as executor:
-            future_map = {
-                executor.submit(convert_file, p, output_dir, force=force, dry_run=dry_run): p
-                for p in files
-            }
-            pbar = tqdm(total=len(files), unit="file", desc="Converting")
-            for future in as_completed(future_map):
+            futures = {}
+            submitted = 0
+            for path in files:
                 if cancel_event and cancel_event.is_set():
                     break
-                path = future_map[future]
+                future = executor.submit(
+                    convert_file, path, output_dir, force=force, dry_run=dry_run
+                )
+                futures[future] = path
+
+            # Notify that all files are submitted (shows total count immediately)
+            _notify(0, f"{total_files} files queued", "converting")
+
+            completed = 0
+            for future in as_completed(futures):
+                if cancel_event and cancel_event.is_set():
+                    pass
+                path = futures[future]
+                completed += 1
                 try:
                     fr = future.result()
                 except Exception as e:
                     fr = FileResult(path=path, status="failed", converter="—",
-                                    format_detected="?", error=str(e)[:200],
+                                    format_detected="unknown", error=str(e),
                                     elapsed_s=0)
                 results.append(fr)
-                converter_times[fr.converter] = converter_times.get(fr.converter, 0) + fr.elapsed_s
-                pbar.update(1)
-                pbar.set_postfix_str(path.name[:40])
-
-                # Phase-aware progress (A3)
-                phase = _phase_for(fr)
-                if progress_callback:
-                    progress_callback(len(results), len(files), path.name, phase)
-            pbar.close()
+                if fr.status == "ok":
+                    ok += 1
+                elif fr.status == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+                conv = fr.converter
+                if conv and conv != "—":
+                    converter_times[conv] = converter_times.get(conv, 0.0) + fr.elapsed_s
+                phase = "done" if fr.status in ("ok", "skipped") else "failed"
+                _notify(completed, path.name, phase)
     else:
-        pbar = tqdm(files, unit="file", desc="Converting")
-        for path in pbar:
+        # Sequential mode: report "converting" before each file
+        for i, path in enumerate(files):
             if cancel_event and cancel_event.is_set():
-                tqdm.write("[!] Canceled by user.")
                 break
-            pbar.set_postfix_str(path.name[:40])
+            _notify(i + 1, path.name, "converting")
             fr = convert_file(path, output_dir, force=force, dry_run=dry_run)
             results.append(fr)
-            converter_times[fr.converter] = converter_times.get(fr.converter, 0) + fr.elapsed_s
-
-            phase = _phase_for(fr)
-            if progress_callback:
-                progress_callback(len(results), len(files), path.name, phase)
+            if fr.status == "ok":
+                ok += 1
+            elif fr.status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+            conv = fr.converter
+            if conv and conv != "—":
+                converter_times[conv] = converter_times.get(conv, 0.0) + fr.elapsed_s
+            phase = "done" if fr.status in ("ok", "skipped") else "failed"
+            _notify(i + 1, path.name, phase)
 
     elapsed = time.perf_counter() - start
-    ok = sum(1 for r in results if r.status == "ok")
-    skipped = sum(1 for r in results if r.status == "skipped")
-    failed = sum(1 for r in results if r.status == "failed")
-
     return BatchSummary(
         total=len(files), ok=ok, skipped=skipped, failed=failed,
         elapsed_s=elapsed, results=results, converter_times=converter_times,
     )
-
-
-def _phase_for(fr: FileResult) -> str:
-    """Derive a user-visible phase label from the result (A3)."""
-    if fr.status == "ok":
-        return "done"
-    if fr.status == "failed":
-        return "failed"
-    if "OCR" in fr.converter or "scan" in fr.format_detected:
-        return "ocr"
-    if "CHM" in fr.converter or "ZIP" in fr.converter or "XZ" in fr.converter:
-        return "extracting"
-    return "converting"

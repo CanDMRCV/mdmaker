@@ -1,29 +1,23 @@
-r"""Tool detection v2 (Rücklauf 5: PATH-Vererbung behoben).
+r"""Tool detection v3 — file-existence only, NO subprocess calls.
 
-Beleg-Block (Rücklauf 5):
-  - Anderson R2: "what you measure ≠ what you get" wenn PATH-Erbe ignoriert
-  - Release It! R3: detection failure = reliability failure
-  - Khorikov R3: self-test MUST use same call path as converter
+CRITICAL: Detection must NEVER run external binaries. Reasons:
+  1. LibreOffice (and some other tools) flash a terminal window even with
+     CREATE_NO_WINDOW — the flag is a request, not a guarantee.
+  2. Each subprocess.run([exe, "--version"]) takes 1–15 seconds, freezing
+     the Qt event loop during PreRunCheckDialog (modal).
+  3. File-existence check is instant, reliable, and sufficient.
 
-URSACHE (verifiziert): subprocess.run(['tesseract','--version']) erbt den PATH
-  des Elternprozesses. winget installiert in %ProgramFiles%\Tesseract-OCR\,
-  was NUR im System-PATH steht (nicht im Prozess-PATH, wenn vor winget gestartet).
-  → subprocess findet tesseract.exe nicht.
+Verification (that the binary actually works) happens at conversion time,
+where proper CREATE_NO_WINDOW + --headless flags are applied.
 
-FIX: Absolute Pfadauflösung vor subprocess-Aufruf.
-  1. Bekannte Installationsorte prüfen
-  2. Windows Registry (HKLM\Software\Tesseract-OCR)
-  3. shutil.which() als Fallback
-  4. Gefundenen Pfad an DETEKTION und CONVERTER übergeben (Konsistenz!)
-
-Jeder Detektor liefert (bool, str) — (installed, resolved_path_or_empty).
-Der absolute Pfad wird gespeichert und an den Converter weitergereicht.
+Beleg-Block (Rücklauf 6):
+  - Khorikov R3: detection must not block the UI thread
+  - Anderson R2: what you measure ≠ what you get when detection has side effects
 """
 
-import subprocess
-import shutil
 import os
 import sys
+import shutil
 import winreg
 from pathlib import Path
 
@@ -32,11 +26,23 @@ def tr(s: str) -> str:
     return s
 
 
-# ── A2: Robust binary resolution (filesystem first, not PATH) ──
+# ── Cache: detect once, never re-run ──
+_cache: dict[str, tuple[bool, str]] = {}
+
+
+def _cached(key: str, fn) -> tuple[bool, str]:
+    if key not in _cache:
+        _cache[key] = fn()
+    return _cache[key]
+
+
+def _clear_cache():
+    _cache.clear()
+
+
+# ── Resolution: find binary by filesystem + registry, NEVER run it ──
 
 def _resolve_tesseract() -> str:
-    """Find tesseract.exe via known locations + registry. Return absolute path or ''."""
-    # 1. Known install locations
     candidates = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe",
         Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Tesseract-OCR" / "tesseract.exe",
@@ -45,8 +51,6 @@ def _resolve_tesseract() -> str:
     for p in candidates:
         if p.exists():
             return str(p)
-
-    # 2. Windows Registry
     for root in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
         for subkey in [r"SOFTWARE\Tesseract-OCR", r"SOFTWARE\WOW6432Node\Tesseract-OCR"]:
             try:
@@ -58,17 +62,11 @@ def _resolve_tesseract() -> str:
                     return str(exe)
             except OSError:
                 pass
-
-    # 3. shutil.which() as fallback (respects PATH of THIS process)
     found = shutil.which("tesseract")
-    if found:
-        return found
-
-    return ""
+    return found or ""
 
 
 def _resolve_calibre() -> str:
-    """Find ebook-convert.exe."""
     candidates = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Calibre2" / "ebook-convert.exe",
         Path(r"C:\Program Files\Calibre2\ebook-convert.exe"),
@@ -81,7 +79,6 @@ def _resolve_calibre() -> str:
 
 
 def _resolve_7zip() -> str:
-    """Find 7z.exe or 7zz.exe."""
     candidates = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "7-Zip" / "7z.exe",
         Path(r"C:\Program Files\7-Zip\7z.exe"),
@@ -97,7 +94,6 @@ def _resolve_7zip() -> str:
 
 
 def _resolve_djvu() -> str:
-    """Find djvutxt.exe."""
     candidates = [
         Path(r"C:\Program Files (x86)\DjVuLibre\djvutxt.exe"),
         Path(r"C:\Program Files\DjVuLibre\djvutxt.exe"),
@@ -109,100 +105,84 @@ def _resolve_djvu() -> str:
     return found or ""
 
 
-# ── A1: Detection with resolved path (THE SAME path the converter will use) ──
+# ── Detection: file-existence ONLY, no subprocess ──
 
 def _detect_tesseract() -> tuple[bool, str]:
-    """Find tesseract, then run --version with ABSOLUTE path."""
-    exe = _resolve_tesseract()
-    if not exe:
-        return (False, "")
-    try:
-        result = subprocess.run(
-            [exe, "--version"],
-            capture_output=True, timeout=15, shell=False,
-        )
-        return (result.returncode == 0, exe)
-    except Exception:
-        return (False, exe)
+    return _cached("tesseract", lambda: (
+        bool(_resolve_tesseract()), _resolve_tesseract()
+    ))
 
 
 def _detect_calibre() -> tuple[bool, str]:
-    exe = _resolve_calibre()
-    if not exe:
-        return (False, "")
-    try:
-        result = subprocess.run(
-            [exe, "--version"],
-            capture_output=True, timeout=15, shell=False,
-        )
-        return (result.returncode == 0, exe)
-    except Exception:
-        return (False, exe)
+    return _cached("calibre", lambda: (
+        bool(_resolve_calibre()), _resolve_calibre()
+    ))
 
 
 def _detect_7zip() -> tuple[bool, str]:
-    exe = _resolve_7zip()
-    if not exe:
-        return (False, "")
-    try:
-        result = subprocess.run(
-            [exe, "--help"],
-            capture_output=True, timeout=10, shell=False,
-        )
-        return (result.returncode == 0, exe)
-    except Exception:
-        return (False, exe)
+    return _cached("7zip", lambda: (
+        bool(_resolve_7zip()), _resolve_7zip()
+    ))
 
 
 def _detect_djvu() -> tuple[bool, str]:
-    exe = _resolve_djvu()
-    if not exe:
-        return (False, "")
-    try:
-        result = subprocess.run(
-            [exe], capture_output=True, timeout=10, shell=False,
-        )
-        return (b"Usage" in result.stderr or b"Usage" in result.stdout, exe)
-    except Exception:
-        return (False, exe)
+    return _cached("djvu", lambda: (
+        bool(_resolve_djvu()), _resolve_djvu()
+    ))
 
 
 def _detect_word_com() -> tuple[bool, str]:
     if sys.platform != "win32":
-        return (False, "")
-    try:
-        import win32com.client
-        word = win32com.client.Dispatch("Word.Application")
-        word.Quit()
-        return (True, "COM")
-    except Exception:
-        return (False, "")
+        return _cached("word_com", lambda: (False, ""))
+    return _cached("word_com", lambda: (
+        bool(shutil.which("winword")) or
+        Path(r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE").exists() or
+        Path(r"C:\Program Files (x86)\Microsoft Office\root\Office16\WINWORD.EXE").exists(),
+        "COM" if True else ""
+    ))
 
 
 def _detect_libreoffice() -> tuple[bool, str]:
-    exe = shutil.which("libreoffice")
-    if not exe:
-        exe = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "LibreOffice" / "program" / "soffice.exe")
-        if not Path(exe).exists():
-            exe = ""
-    if not exe:
-        return (False, "")
-    try:
-        result = subprocess.run([exe, "--version"], capture_output=True, timeout=15, shell=False)
-        return (result.returncode == 0, exe)
-    except Exception:
-        return (False, exe)
+    return _cached("libreoffice", lambda: (
+        bool(_find_libreoffice_exe()), _find_libreoffice_exe()
+    ))
+
+
+def _find_libreoffice_exe() -> str:
+    for name in ["soffice", "soffice.exe", "libreoffice"]:
+        found = shutil.which(name)
+        if found:
+            return found
+    for base in [
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    ]:
+        if Path(base).exists():
+            return base
+    return ""
 
 
 def _detect_pymupdf() -> tuple[bool, str]:
+    return _cached("pymupdf", lambda: (
+        _check_import("pymupdf"), "import"
+    ))
+
+
+def _detect_ebooklib() -> tuple[bool, str]:
+    return _cached("ebooklib", lambda: (
+        _check_import("ebooklib") and _check_import("bs4"), "import"
+    ))
+
+
+def _check_import(name: str) -> bool:
     try:
-        import fitz  # noqa: F401
-        return (True, "import")
+        __import__(name)
+        return True
     except ImportError:
-        return (False, "")
+        return False
 
 
-# ── ToolInfo class (A2: stores resolved path for converter use) ──
+# ── ToolInfo class ──
 
 class ToolInfo:
     def __init__(self, key: str, name: str, formats: str,
@@ -218,7 +198,6 @@ class ToolInfo:
         self._resolved_path: str = ""
 
     def check(self) -> bool:
-        """Re-run detection, cache resolved path."""
         ok, path = self._detect()
         self._resolved_path = path if ok else ""
         return ok
@@ -228,7 +207,6 @@ class ToolInfo:
 
     @property
     def resolved_path(self) -> str:
-        """Absolute path to the tool binary (for passing to converter)."""
         if not self._resolved_path:
             self.check()
         return self._resolved_path
@@ -239,27 +217,22 @@ class ToolInfo:
 ALL_TOOLS: dict[str, ToolInfo] = {
     "pymupdf": ToolInfo("pymupdf", "PyMuPDF (fitz)", "PDF (text)",
                         _detect_pymupdf, "pip install PyMuPDF", required=True),
-    "calibre": ToolInfo("calibre", "Calibre", "EPUB, MOBI, PRC",
-                        _detect_calibre, "winget install calibre", required=True),
+    "ebooklib": ToolInfo("ebooklib", "ebooklib + bs4", "EPUB, MOBI, PRC",
+                         _detect_ebooklib, "pip install ebooklib beautifulsoup4 lxml", required=True),
     "tesseract": ToolInfo("tesseract", "Tesseract OCR", "PDF (scanned)",
                           _detect_tesseract, "winget install tesseract-ocr.tesseract",
-                          "Tesseract is installed but eng.traineddata is missing. "
-                          "Download from: https://github.com/tesseract-ocr/tessdata "
-                          "and place in the tessdata folder next to tesseract.exe.",
-                          ),
+                          "Also download eng.traineddata from tessdata repo."),
     "7zip": ToolInfo("7zip", "7-Zip", "CHM",
                      _detect_7zip, "winget install 7zip.7zip"),
     "djvu": ToolInfo("djvu", "DjVuLibre", "DJVU",
                      _detect_djvu, "winget install DjVuLibre.DjView"),
     "word": ToolInfo("word", "Microsoft Word", "DOC",
                      _detect_word_com, "",
-                     "Microsoft Word is part of Office/M365.",
-                     ),
+                     "Microsoft Word is part of Office/M365."),
     "libreoffice": ToolInfo("libreoffice", "LibreOffice", "DOC",
                             _detect_libreoffice,
                             "winget install TheDocumentFoundation.LibreOffice",
-                            "Free alternative to Word for .doc conversion.",
-                            ),
+                            "Free alternative to Word for .doc conversion."),
 }
 
 
@@ -270,24 +243,23 @@ def missing_tools() -> list[ToolInfo]:
 def tools_needed_for_files(files: list[Path]) -> list[ToolInfo]:
     needed = set()
     for f in files:
-        ext = f.suffix.lower()
-        if ext in (".epub", ".mobi", ".prc", ".azw", ".azw3"):
-            needed.add("calibre")
-        elif ext == ".pdf":
-            from ..detector import classify_pdf
-            try:
-                if classify_pdf(f) == "pdf_scan":
-                    needed.add("tesseract")
-                else:
-                    needed.add("pymupdf")
-            except Exception:
-                needed.add("pymupdf")
-        elif ext == ".djvu":
+        from ..detector import detect_format
+        fmt = detect_format(f)
+        if fmt in ("epub", "mobi", "prc"):
+            needed.add("ebooklib")
+        elif fmt == "pdf_text":
+            needed.add("pymupdf")
+        elif fmt == "pdf_scan":
+            needed.add("tesseract")
+        elif fmt == "djvu":
             needed.add("djvu")
-        elif ext == ".chm":
+        elif fmt == "chm":
             needed.add("7zip")
-        elif ext == ".doc":
-            needed.add("word")
+        elif fmt == "doc":
+            if not _detect_libreoffice()[0]:
+                needed.add("word")
+        elif fmt == "docx":
+            pass
     return [ALL_TOOLS[n] for n in needed if n in ALL_TOOLS]
 
 
